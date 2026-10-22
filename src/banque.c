@@ -1,30 +1,52 @@
 #include "banque.h"
-#include "synchronisation.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <unistd.h>
+#include <signal.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <sys/msg.h>
+#include <sys/wait.h>
+#include <time.h>
 
-#define CAPACITE_FILE 16
 #define NB_EMPLOYES 2
+#define TOTAL_INTERNE 5
+#define DELAI_MAX 5
 
 typedef struct { int proprietaire; Montant solde; } Compte;
 typedef struct {
-    int client;
-    Operation operation;
-    int source;
-    int destination;
-    Montant montant;
-    Reponse reponse;
-    Semaphore terminee;
-} Requete;
+    long type; /* Positif et obligatoirement en premiere position. */
+    struct {
+        pid_t pid;
+        unsigned numero;
+        int client, operation, source, destination;
+        Montant montant;
+    } corps;
+} MessageRequete;
+typedef struct {
+    long type; /* PID du destinataire. */
+    struct { unsigned numero; Reponse resultat; } corps;
+} MessageReponse;
 
+/* Les comptes sont utilises uniquement dans le processus banque.
+   Les clients heritent des identifiants IPC par fork, pas des soldes vivants. */
 static Compte comptes[NB_COMPTES];
-static Requete *file[CAPACITE_FILE];
-static int taille_file;
-static int arret;
-static Mutex verrou_file, verrou_comptes;
-static Semaphore disponibles, places;
-static Thread employes[NB_EMPLOYES];
-static const char *noms[] = { "Alice", "Bob", "Charlie" };
+static pthread_mutex_t verrou_comptes;
+static sem_t employes_prets;
+static int demandes = -1, reponses = -1;
+static pid_t serveur = -1, proprietaire = -1;
+static volatile sig_atomic_t interruption;
+
+static void recevoir_signal(int signal_recu) {
+    (void)signal_recu;
+    interruption = 1; /* Aucun printf ni nettoyage dans le gestionnaire. */
+}
+
+int banque_interrompue(void) { return interruption != 0; }
 
 const char *banque_client(int client) {
+    static const char *noms[] = { "Alice", "Bob", "Charlie" };
     return client >= 1 && client <= NB_CLIENTS ? noms[client - 1] : "Inconnu";
 }
 
@@ -38,169 +60,259 @@ const char *banque_message(Statut statut) {
         case FONDS_INSUFFISANTS: return "Solde insuffisant";
         case PLAFOND_DEPASSE: return "Plafond du compte depasse";
         case MEME_COMPTE: return "Les deux comptes sont identiques";
+        case SERVICE_INDISPONIBLE: return "Service indisponible/interruption : resultat non confirme";
         default: return "Operation inconnue";
     }
 }
 
-static int priorite(Operation operation) {
-    if (operation == TRANSFERT) return 3;
+/* Avec msgrcv(..., -3, ...), le plus PETIT type passe en premier. */
+static long priorite(int operation) {
+    if (operation == TRANSFERT) return 1;
     if (operation == DEPOT || operation == RETRAIT) return 2;
-    return 1;
+    return 3;
 }
 
-/* Le premier de priorite maximale gagne : FIFO entre priorites egales. */
-static Requete *extraire(void) {
-    int meilleur = 0;
-    int i;
-    Requete *resultat;
-    for (i = 1; i < taille_file; i++) {
-        if (priorite(file[i]->operation) > priorite(file[meilleur]->operation))
-            meilleur = i;
-    }
-    resultat = file[meilleur];
-    for (i = meilleur; i < taille_file - 1; i++) file[i] = file[i + 1];
-    taille_file--;
-    return resultat;
-}
-
-/* Appelee uniquement sous verrou_comptes. Toutes les validations precedent
-   les modifications : un refus ne peut donc jamais produire un demi-transfert. */
-static Reponse executer(const Requete *r) {
+/* Appelee sous verrou : toutes les validations precedent les modifications. */
+static Reponse executer(const MessageRequete *message) {
+    const int client = message->corps.client;
+    const int operation = message->corps.operation;
+    const int numero_source = message->corps.source;
+    const int numero_destination = message->corps.destination;
+    const Montant montant = message->corps.montant;
     Reponse rep = { SUCCES, -1 };
     Compte *source, *destination;
-    if (r->client < 1 || r->client > NB_CLIENTS) {
+    if (operation == TOTAL_INTERNE) {
+        int i;
+        rep.solde = 0;
+        for (i = 0; i < NB_COMPTES; i++) rep.solde += comptes[i].solde;
+        return rep;
+    }
+    if (client < 1 || client > NB_CLIENTS) {
         rep.statut = CLIENT_INVALIDE; return rep;
     }
-    if (r->source < 1 || r->source > NB_COMPTES) {
+    if (numero_source < 1 || numero_source > NB_COMPTES) {
         rep.statut = COMPTE_INVALIDE; return rep;
     }
-    source = &comptes[r->source - 1];
-    if (source->proprietaire != r->client) {
+    source = &comptes[numero_source - 1];
+    if (source->proprietaire != client) {
         rep.statut = ACCES_REFUSE; return rep;
     }
     rep.solde = source->solde;
-    if (r->operation < DEPOT || r->operation > CONSULTATION) {
+    if (operation < DEPOT || operation > CONSULTATION) {
         rep.statut = OPERATION_INVALIDE; return rep;
     }
-    if (r->operation == CONSULTATION) return rep;
-    if (r->montant <= 0 || r->montant > SOLDE_MAX) {
+    if (operation == CONSULTATION) return rep;
+    if (montant <= 0 || montant > SOLDE_MAX) {
         rep.statut = MONTANT_INVALIDE; return rep;
     }
-    if (r->operation == DEPOT) {
-        if (r->montant > SOLDE_MAX - source->solde) rep.statut = PLAFOND_DEPASSE;
-        else source->solde += r->montant;
-    } else if (r->operation == RETRAIT) {
-        if (r->montant > source->solde) rep.statut = FONDS_INSUFFISANTS;
-        else source->solde -= r->montant;
+    if (operation == DEPOT) {
+        if (montant > SOLDE_MAX - source->solde) rep.statut = PLAFOND_DEPASSE;
+        else source->solde += montant;
+    } else if (operation == RETRAIT) {
+        if (montant > source->solde) rep.statut = FONDS_INSUFFISANTS;
+        else source->solde -= montant;
     } else {
-        if (r->destination < 1 || r->destination > NB_COMPTES) {
+        if (numero_destination < 1 || numero_destination > NB_COMPTES) {
             rep.statut = COMPTE_INVALIDE; return rep;
         }
-        if (r->source == r->destination) {
+        if (numero_source == numero_destination) {
             rep.statut = MEME_COMPTE; return rep;
         }
-        destination = &comptes[r->destination - 1];
-        if (r->montant > source->solde) rep.statut = FONDS_INSUFFISANTS;
-        else if (r->montant > SOLDE_MAX - destination->solde) rep.statut = PLAFOND_DEPASSE;
+        destination = &comptes[numero_destination - 1];
+        if (montant > source->solde) rep.statut = FONDS_INSUFFISANTS;
+        else if (montant > SOLDE_MAX - destination->solde) rep.statut = PLAFOND_DEPASSE;
         else {
-            source->solde -= r->montant;
-            destination->solde += r->montant;
+            source->solde -= montant;
+            destination->solde += montant;
         }
     }
     rep.solde = source->solde;
     return rep;
 }
 
-static FONCTION_THREAD travailler(void *argument) {
+static void *travailler(void *argument) {
     (void)argument;
+    sem_post(&employes_prets);
     for (;;) {
-        Requete *r;
-        semaphore_attendre(&disponibles);
-        mutex_prendre(&verrou_file);
-        if (taille_file == 0 && arret) {
-            mutex_liberer(&verrou_file);
-            break;
+        MessageRequete req;
+        MessageReponse rep = {0};
+        ssize_t taille = msgrcv(demandes, &req, sizeof req.corps, -3, 0);
+        if (taille == -1) {
+            if (errno == EINTR) continue;
+            break; /* IPC_RMID reveille les employes bloques. */
         }
-        r = extraire();
-        mutex_liberer(&verrou_file);
-        semaphore_signaler(&places);
-        mutex_prendre(&verrou_comptes);
-        r->reponse = executer(r);
-        mutex_liberer(&verrou_comptes);
-        /* Ne plus toucher r ensuite : le client peut retourner de sa fonction. */
-        semaphore_signaler(&r->terminee);
+        if (taille != (ssize_t)sizeof req.corps || req.corps.pid <= 0) continue;
+        rep.type = (long)req.corps.pid;
+        rep.corps.numero = req.corps.numero;
+        pthread_mutex_lock(&verrou_comptes);
+        rep.corps.resultat = executer(&req);
+        pthread_mutex_unlock(&verrou_comptes);
+        while (msgsnd(reponses, &rep, sizeof rep.corps, 0) == -1) {
+            if (errno != EINTR) return NULL;
+        }
     }
-    return FIN_THREAD;
+    return NULL;
 }
 
-void banque_demarrer(void) {
-    int i;
-    taille_file = 0;
-    arret = 0;
+static void supprimer_files(void) {
+    if (demandes != -1) msgctl(demandes, IPC_RMID, NULL);
+    if (reponses != -1) msgctl(reponses, IPC_RMID, NULL);
+    /* Ne pas modifier les identifiants pendant que les employes les lisent. */
+}
+
+/* SIGINT et SIGTERM sont bloques dans tous les threads du serveur.
+   Son thread principal les attend avec sigwait, puis nettoie normalement. */
+static void servir(int tube_pret, const sigset_t *signaux) {
+    pthread_t employes[NB_EMPLOYES];
+    int i, signal_recu;
+    char pret = 'P';
+    if (pthread_mutex_init(&verrou_comptes, NULL) != 0 ||
+        sem_init(&employes_prets, 0, 0) == -1) _exit(EXIT_FAILURE);
     for (i = 0; i < NB_COMPTES; i++) {
         comptes[i].proprietaire = i / 2 + 1;
-        comptes[i].solde = 100000; /* 1000,00 euros */
+        comptes[i].solde = 100000;
     }
-    mutex_creer(&verrou_file);
-    mutex_creer(&verrou_comptes);
-    semaphore_creer(&disponibles, 0);
-    semaphore_creer(&places, CAPACITE_FILE);
-    for (i = 0; i < NB_EMPLOYES; i++) thread_creer(&employes[i], travailler, NULL);
+    for (i = 0; i < NB_EMPLOYES; i++) {
+        if (pthread_create(&employes[i], NULL, travailler, NULL) != 0) {
+            supprimer_files(); _exit(EXIT_FAILURE);
+        }
+    }
+    for (i = 0; i < NB_EMPLOYES; i++) {
+        while (sem_wait(&employes_prets) == -1) {
+            if (errno != EINTR) _exit(EXIT_FAILURE);
+        }
+    }
+    /* Le pere attend cet octet avant d'envoyer la premiere transaction. */
+    if (write(tube_pret, &pret, 1) != 1) {
+        supprimer_files(); _exit(EXIT_FAILURE);
+    }
+    close(tube_pret);
+    sigwait(signaux, &signal_recu);
+    supprimer_files(); /* Debloque msgrcv ET msgsnd avant les pthread_join. */
+    for (i = 0; i < NB_EMPLOYES; i++) pthread_join(employes[i], NULL);
+    sem_destroy(&employes_prets);
+    pthread_mutex_destroy(&verrou_comptes);
+    _exit(EXIT_SUCCESS);
+}
+
+int banque_demarrer(void) {
+    int tube[2];
+    char pret = 0;
+    ssize_t lu;
+    sigset_t signaux, ancien_masque;
+    struct sigaction action = {0};
+    interruption = 0;
+    proprietaire = getpid();
+    action.sa_handler = recevoir_signal;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGINT, &action, NULL) == -1 ||
+        sigaction(SIGTERM, &action, NULL) == -1) return 0;
+    demandes = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+    if (demandes == -1) return 0;
+    reponses = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+    if (reponses == -1) { supprimer_files(); return 0; }
+    if (pipe(tube) == -1) { supprimer_files(); return 0; }
+    sigemptyset(&signaux);
+    sigaddset(&signaux, SIGINT);
+    sigaddset(&signaux, SIGTERM);
+    if (sigprocmask(SIG_BLOCK, &signaux, &ancien_masque) == -1) {
+        close(tube[0]); close(tube[1]); supprimer_files(); return 0;
+    }
+    fflush(NULL);
+    serveur = fork();
+    if (serveur == 0) {
+        close(tube[0]);
+        servir(tube[1], &signaux);
+    }
+    close(tube[1]);
+    sigprocmask(SIG_SETMASK, &ancien_masque, NULL);
+    if (serveur == -1) { close(tube[0]); supprimer_files(); return 0; }
+    do { lu = read(tube[0], &pret, 1); } while (lu == -1 && errno == EINTR && !interruption);
+    close(tube[0]);
+    if (lu != 1 || pret != 'P' || interruption) {
+        banque_arreter(); return 0;
+    }
+    return 1;
+}
+
+/* Attentes bornees et interruptibles cote client. Un serveur disparu
+   ne doit pas laisser un processus bloque indefiniment. */
+static int temps_ecoule(const struct timespec *debut) {
+    struct timespec maintenant;
+    clock_gettime(CLOCK_MONOTONIC, &maintenant);
+    return maintenant.tv_sec - debut->tv_sec > DELAI_MAX ||
+           (maintenant.tv_sec - debut->tv_sec == DELAI_MAX && maintenant.tv_nsec >= debut->tv_nsec);
 }
 
 Reponse banque_envoyer(int client, Operation operation, int source,
                        int destination, Montant montant) {
-    Requete r;
-    r.client = client;
-    r.operation = operation;
-    r.source = source;
-    r.destination = destination;
-    r.montant = montant;
-    semaphore_creer(&r.terminee, 0);
-    semaphore_attendre(&places);
-    mutex_prendre(&verrou_file);
-    file[taille_file++] = &r;
-    mutex_liberer(&verrou_file);
-    semaphore_signaler(&disponibles);
-    semaphore_attendre(&r.terminee);
-    semaphore_detruire(&r.terminee);
-    return r.reponse;
+    static unsigned numero;
+    MessageRequete req = {0};
+    MessageReponse rep;
+    Reponse erreur = { SERVICE_INDISPONIBLE, -1 };
+    struct timespec debut, pause = { 0, 1000000 };
+    if (interruption || demandes == -1 || reponses == -1) return erreur;
+    req.type = priorite(operation);
+    req.corps.pid = getpid();
+    req.corps.numero = ++numero;
+    req.corps.client = client;
+    req.corps.operation = operation;
+    req.corps.source = source;
+    req.corps.destination = destination;
+    req.corps.montant = montant;
+    clock_gettime(CLOCK_MONOTONIC, &debut);
+    while (msgsnd(demandes, &req, sizeof req.corps, IPC_NOWAIT) == -1) {
+        if ((errno != EAGAIN && errno != EINTR) || interruption || temps_ecoule(&debut)) return erreur;
+        nanosleep(&pause, NULL);
+    }
+    for (;;) {
+        ssize_t taille;
+        if (interruption || temps_ecoule(&debut)) return erreur;
+        taille = msgrcv(reponses, &rep, sizeof rep.corps, (long)getpid(), IPC_NOWAIT);
+        if (taille == (ssize_t)sizeof rep.corps && rep.corps.numero == numero)
+            return rep.corps.resultat;
+        if (taille == -1 && errno != ENOMSG && errno != EINTR) return erreur;
+        nanosleep(&pause, NULL);
+    }
 }
 
 void banque_arreter(void) {
-    int i;
-    mutex_prendre(&verrou_file);
-    arret = 1;
-    mutex_liberer(&verrou_file);
-    for (i = 0; i < NB_EMPLOYES; i++) semaphore_signaler(&disponibles);
-    for (i = 0; i < NB_EMPLOYES; i++) thread_attendre(employes[i]);
-    semaphore_detruire(&disponibles);
-    semaphore_detruire(&places);
-    mutex_detruire(&verrou_comptes);
-    mutex_detruire(&verrou_file);
+    int statut;
+    if (getpid() != proprietaire) return;
+    if (serveur > 0) {
+        kill(serveur, SIGTERM);
+        while (waitpid(serveur, &statut, 0) == -1 && errno == EINTR) { }
+        serveur = -1;
+    }
+    supprimer_files();
+    demandes = reponses = -1;
+}
+
+void banque_decrire(void) {
+    printf("Client PID=%ld | Banque PID=%ld | Files requetes=%d reponses=%d\n",
+           (long)getpid(), (long)serveur, demandes, reponses);
 }
 
 Montant banque_total(void) {
-    Montant total = 0;
-    int i;
-    mutex_prendre(&verrou_comptes);
-    for (i = 0; i < NB_COMPTES; i++) total += comptes[i].solde;
-    mutex_liberer(&verrou_comptes);
-    return total;
+    Reponse rep = banque_envoyer(0, (Operation)TOTAL_INTERNE, 0, 0, 0);
+    return rep.statut == SUCCES ? rep.solde : -1;
 }
 
 int banque_test_priorites(void) {
-    Requete a = {0}, b = {0}, c = {0}, d = {0};
-    int ok;
-    a.operation = CONSULTATION; b.operation = DEPOT;
-    c.operation = TRANSFERT; d.operation = RETRAIT;
-    mutex_prendre(&verrou_file);
-    file[0] = &a; file[1] = &b; file[2] = &c; file[3] = &d;
-    taille_file = 4;
-    ok = extraire() == &c;
-    ok = (extraire() == &b) && ok;
-    ok = (extraire() == &d) && ok;
-    ok = (extraire() == &a) && ok;
-    mutex_liberer(&verrou_file);
+    int id = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+    int i, ok = 1;
+    long types[] = {3, 2, 1, 2};
+    unsigned attendu[] = {2, 1, 3, 0};
+    MessageRequete req = {0};
+    if (id == -1) return 0;
+    for (i = 0; i < 4; i++) {
+        req.type = types[i]; req.corps.numero = (unsigned)i;
+        if (msgsnd(id, &req, sizeof req.corps, IPC_NOWAIT) == -1) ok = 0;
+    }
+    for (i = 0; i < 4; i++) {
+        if (msgrcv(id, &req, sizeof req.corps, -3, IPC_NOWAIT) == -1 ||
+            req.corps.numero != attendu[i]) ok = 0;
+    }
+    msgctl(id, IPC_RMID, NULL);
     return ok;
 }

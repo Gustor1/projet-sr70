@@ -1,235 +1,183 @@
-# Comprendre le projet, étape par étape
+# Comprendre la version Linux et ses notions SR70
 
-## 1. L'idée générale
+## 1. Ce qui a changé
 
-Imagine une banque avec plusieurs clients et deux employés. Un client ne modifie jamais directement les comptes. Il écrit une demande, la dépose dans une file, puis attend une réponse. Un employé récupère une demande, contrôle sa validité et réalise l'opération.
+La première version utilisait des threads dans un seul processus et une file construite dans un tableau. La nouvelle version utilise les mécanismes Linux présentés dans les cours : de vrais processus, deux files System V, un tube et des signaux. Les règles bancaires et la représentation des montants restent les mêmes.
 
-Dans le programme, un employé est un **thread** : un chemin d'exécution indépendant à l'intérieur du processus. Les trois clients de démonstration ont également chacun leur thread. Ils peuvent avancer en concurrence, selon les décisions du système d'exploitation.
+Cette version remplace le transport Windows. Elle se lance sous Linux ou depuis CMD via Ubuntu/WSL avec `lancer.cmd`. Il n'y a aucune donnée bancaire enregistrée sur disque à migrer. L'ancienne version reste récupérable dans l'historique Git, au commit `8f52222`, si un retour est nécessaire.
 
-Le menu est exécuté par le thread principal. Quand tu utilises le menu, il joue le rôle d'un client ; quand tu lances la démonstration, il crée les trois threads clients puis attend leur fin.
+## 2. Organisation des processus
 
 ```text
-Client Alice ----\
-Client Bob -------+--> file de requêtes --> employé 1 ou employé 2
-Client Charlie --/                               |
-                                                v
-                                   validation et accès aux comptes
-                                                |
-                      client réveillé <-- réponse succès/échec
+Processus principal : menu et supervision
+    |
+    +-- fork --> Processus banque
+    |              +-- thread principal : attend un signal d'arrêt
+    |              +-- thread employé 1 : reçoit et traite les demandes
+    |              +-- thread employé 2 : reçoit et traite les demandes
+    |
+    +-- fork --> Client Alice   (pendant la démonstration)
+    +-- fork --> Client Bob     (pendant la démonstration)
+    +-- fork --> Client Charlie (pendant la démonstration)
+
+Clients -- file de requêtes --> banque -- file de réponses --> clients
 ```
 
-Les comptes sont partagés. Les employés ont donc besoin de se coordonner pour éviter de les modifier simultanément de façon incohérente.
+Le processus principal joue lui-même le rôle du client lorsque tu utilises le menu. Le changement Alice/Bob/Charlie choisit une identité simulée. Le choix 7 crée réellement trois processus clients supplémentaires.
 
-## 2. Les données principales
+`fork()` renvoie zéro au fils et son PID au père. Le programme distingue les deux branches avec cette valeur. `getpid()` permet d'afficher le PID et d'adresser la réponse au bon processus.
 
-### Un compte
+Le père utilise `waitpid()` pour attendre chaque enfant et récupérer son statut. Cela évite de laisser des processus zombies. Les fils terminent avec `_exit()` après avoir vidé leurs affichages : ils ne continuent pas dans le menu du père.
 
-Dans `banque.c`, un compte contient deux champs :
+Le processus principal ne crée aucun thread. Tous ses `fork` clients sont donc réalisés depuis un processus à un seul thread. Les employés appartiennent au processus banque, séparé : on évite ainsi les difficultés d'un `fork` effectué par un programme déjà multithreadé.
+
+## 3. Où sont les comptes ?
+
+Les six comptes sont un tableau utilisé uniquement par la banque. Chaque compte contient l'identifiant de son propriétaire et un solde `long long` en centimes. La banque initialise chaque compte à `100000`, soit 1 000 €.
+
+Après `fork`, deux processus ne partagent pas automatiquement les changements de leurs variables ordinaires. Un client n'accède donc jamais au tableau pour consulter un solde. Il envoie un message au serveur, qui détient les valeurs à jour.
+
+Les deux threads employés partagent, eux, la mémoire du processus banque. Ils peuvent accéder aux mêmes comptes, avec un mutex pour les protéger. Aucun segment `shmget` n'est nécessaire dans cette architecture.
+
+## 4. Création des files System V
+
+`banque_demarrer()` crée deux files avec :
 
 ```c
-typedef struct {
-    int proprietaire;
-    Montant solde;
-} Compte;
+msgget(IPC_PRIVATE, IPC_CREAT | 0600);
 ```
 
-Le propriétaire est un identifiant client entre 1 et 3. Le solde est un entier `long long`, renommé `Montant` pour rendre le code plus clair. Les six comptes sont rangés dans un tableau.
+La première reçoit les transactions ; la seconde contient les réponses. Chaque lancement obtient de nouvelles files, ce qui permet de lancer deux banques indépendantes en même temps. Le mode `0600` réserve l'accès au propriétaire de l'objet.
 
-L'utilisateur voit les numéros 1 à 6 ; en C, les indices vont de 0 à 5. Pour accéder au compte numéro `source`, on utilise donc `comptes[source - 1]`, après avoir vérifié que ce numéro existe.
+`IPC_PRIVATE` demande la création d'un nouvel objet ; ce n'est pas une authentification. Les identifiants entiers des files sont connus des processus descendants grâce à `fork`. Il n'est donc pas nécessaire de passer par `ftok` pour les retrouver.
 
-### Pourquoi des centimes ?
+Les messages commencent obligatoirement par un `long type`, suivi d'une structure `corps`. La taille transmise à `msgsnd` et `msgrcv` est `sizeof message.corps`, sans le champ `type`.
 
-Un montant de 12,50 € est enregistré comme `1250`. Avec les nombres flottants, certaines valeurs décimales ne sont pas représentées exactement. En centimes, les additions et soustractions restent exactes.
+Les corps sont composés de valeurs. On ne transmet ni pointeur vers une requête locale ni sémaphore dans le message : une adresse d'un processus n'est pas un moyen de désigner une variable utilisable dans un autre processus.
 
-Pour afficher `1250`, la division entière `1250 / 100` donne 12 euros et le reste `1250 % 100` donne 50 centimes. Le format `%02lld` affiche toujours deux chiffres pour les centimes.
+## 5. Contenu des messages
 
-Chaque compte est limité à un milliard d'euros. On vérifie la place restante avec `SOLDE_MAX - solde` avant un crédit. Les montants invalides sont refusés avant les calculs bancaires.
+Une requête contient le PID du client, un numéro de requête, l'identifiant client simulé, l'opération, les numéros des comptes et le montant.
 
-### Une requête et une réponse
-
-Une `Requete` indique : le client, l'opération, le compte source, le compte destinataire et le montant. Elle contient aussi une `Reponse` et un sémaphore `terminee`.
-
-La réponse contient un statut et le solde source à l'instant du traitement. Un statut peut être `SUCCES`, `FONDS_INSUFFISANTS`, `ACCES_REFUSE`, etc. Un solde de `-1` indique qu'on ne peut pas fournir le solde, notamment si le compte n'appartient pas au client.
-
-Les types `enum` remplacent des nombres difficiles à comprendre par des noms : `TRANSFERT` est plus lisible que `3` dans la logique bancaire.
-
-## 3. Le trajet exact d'une demande
-
-La fonction publique est :
+Une réponse contient le numéro de requête et le résultat : statut et solde source. Son type est le PID du destinataire.
 
 ```c
-Reponse banque_envoyer(int client, Operation operation, int source,
-                       int destination, Montant montant);
+msgrcv(reponses, &rep, sizeof rep.corps, (long)getpid(), IPC_NOWAIT);
 ```
 
-Par exemple :
+Le type positif permet au client de ne récupérer que les réponses destinées à son processus. Le numéro permet d'ignorer une ancienne réponse arrivée après une attente expirée. Une seule demande à la fois est autorisée par processus client ; cette fonction n'est pas prévue pour plusieurs threads appelants du même client.
 
-```c
-Reponse resultat = banque_envoyer(1, TRANSFERT, 1, 3, 5000);
-```
+Le PID sert au routage de la simulation, pas à prouver une identité ou à authentifier un utilisateur.
 
-Cela signifie : Alice demande un transfert de 50 € du compte 1 vers le compte 3.
+## 6. Priorités des opérations
 
-Voici les étapes :
+Avec l'API System V, le plus petit type représente ici la plus haute priorité :
 
-1. Le thread client construit sa requête locale `r`.
-2. Il crée `r.terminee`, initialisé à zéro.
-3. Il attend une place libre dans la file.
-4. Il verrouille la file, y ajoute l'adresse `&r`, puis libère le verrou.
-5. Il signale qu'une demande est disponible.
-6. Il attend le signal `r.terminee`, sans effectuer de boucle d'attente active.
-7. Un employé extrait la demande et libère une place dans la file.
-8. L'employé verrouille les comptes, exécute l'opération, écrit la réponse puis libère le verrou.
-9. L'employé signale `r.terminee` : le client peut reprendre.
-10. Le client détruit son sémaphore et renvoie la réponse à son appelant.
-
-Pourquoi stocker une adresse vers une variable locale est-il valide ici ? Parce que `banque_envoyer` reste en attente tant que l'employé n'a pas terminé. Sa variable `r` existe donc encore pendant tout le traitement. Après le signal, l'employé ne doit plus accéder à cette requête. Une version où le client retourne immédiatement nécessiterait une autre gestion de sa durée de vie.
-
-## 4. Les mutex : protéger les données
-
-Un **mutex** donne l'accès à une zone critique à un seul thread à la fois. Les autres attendent sa libération.
-
-### Le verrou de la file
-
-`verrou_file` protège le tableau des requêtes et `taille_file`. Sans lui, deux clients pourraient lire la même taille, écrire au même emplacement et perdre une demande.
-
-Les opérations « ajouter une requête » et « choisir puis retirer une requête » sont chacune effectuées entièrement sous ce verrou.
-
-### Le verrou des comptes
-
-`verrou_comptes` protège la vérification et la modification des soldes. Même une consultation prend ce verrou pour ne pas lire un état intermédiaire.
-
-Supposons un compte de 100 € et deux retraits simultanés de 80 €. Sans protection, les deux employés pourraient voir 100 € et accepter tous les deux. Avec le verrou :
-
-1. Le premier employé lit 100 €, accepte le retrait et laisse 20 €.
-2. Il libère le verrou.
-3. Le second lit 20 € et refuse le retrait.
-
-On protège donc **la vérification et la modification ensemble**, pas seulement l'écriture finale.
-
-### Pourquoi un seul verrou pour tous les comptes ?
-
-C'est plus simple à expliquer et évite de gérer deux verrous dans chaque transfert. Les requêtes arrivent de plusieurs clients et deux employés les prennent en charge, mais les modifications bancaires sont sérialisées par ce verrou global.
-
-Une banque industrielle pourrait utiliser un verrou par compte pour traiter davantage d'opérations simultanément. Cela demanderait notamment un ordre fixe de prise des verrous pour éviter les interblocages. Ce degré de complexité n'est pas nécessaire ici.
-
-Les employés libèrent le verrou de la file avant de prendre celui des comptes. Ils ne gardent donc pas ces deux verrous simultanément.
-
-## 5. Les sémaphores : attendre un événement
-
-Un **sémaphore** possède un compteur. Attendre consomme une unité ; s'il n'y en a aucune, le thread est suspendu. Signaler ajoute une unité et permet à un thread en attente de reprendre.
-
-| Sémaphore | Valeur initiale | Signification |
-|---|---|---|
-| `places` | 16 | Emplacements disponibles dans la file |
-| `disponibles` | 0 | Requêtes à récupérer, puis signaux de fermeture |
-| `r.terminee` | 0 | Réponse disponible pour cette requête précise |
-
-Quand la file est pleine, les clients attendent une place au lieu d'écrire hors du tableau. Quand elle est vide, les employés attendent une demande. Chaque client reçoit sa propre réponse, grâce à son sémaphore dédié.
-
-Un mutex et un sémaphore n'ont donc pas exactement le même rôle : le mutex protège une donnée ; le sémaphore sert ici à attendre une ressource ou une réponse.
-
-## 6. Les priorités
-
-Les niveaux sont définis dans `priorite` :
-
-| Opération | Priorité |
+| Opération | Type |
 |---|---|
-| Transfert | 3 |
-| Dépôt ou retrait | 2 |
-| Consultation | 1 |
+| Transfert | 1 |
+| Dépôt / retrait | 2 |
+| Consultation / total interne | 3 |
 
-La fonction `extraire` parcourt la file et retient la première demande ayant la plus grande priorité. Elle décale ensuite les éléments pour supprimer la demande sélectionnée.
-
-Exemple : si la file contient consultation, dépôt, transfert, retrait, l'ordre de sélection sera transfert, dépôt, retrait, consultation.
-
-Le test utilise `>` et pas `>=`. Ainsi, deux demandes de même priorité conservent leur ordre d'arrivée dans la file : c'est FIFO, « premier entré, premier sorti ».
-
-Cette priorité s'applique aux demandes **encore présentes dans la file**. Elle n'interrompt pas une opération déjà extraite. Avec deux employés, l'ordre des réponses ou de prise du verrou des comptes peut différer de l'ordre d'extraction. Il ne s'agit pas non plus de régler les priorités des threads dans Windows ou Linux.
-
-Une arrivée continue de transferts pourrait retarder longtemps les consultations. Ce projet utilise une priorité stricte, sans mécanisme de vieillissement ; la démonstration est finie, donc toutes ses requêtes finissent par être traitées.
-
-## 7. L'atomicité d'un transfert
-
-Un transfert doit retirer de l'argent à la source **et** ajouter exactement la même somme à la destination.
-
-La fonction `executer` vérifie le client, l'existence et la propriété du compte source, l'opération, le montant, la destination, la différence entre les deux comptes, les fonds disponibles et le plafond du destinataire.
-
-Toutes les validations précèdent ces deux instructions :
+Les employés appellent :
 
 ```c
-source->solde -= r->montant;
-destination->solde += r->montant;
+msgrcv(demandes, &req, sizeof req.corps, -3, 0);
 ```
 
-Elles sont exécutées sous le même mutex. Aucun autre employé ne peut observer l'état situé entre les deux lignes. Si une validation échoue, aucune des deux lignes n'est exécutée : aucun remboursement correctif n'est nécessaire.
+Le type négatif demande le message du plus petit type inférieur ou égal à 3 ; à type égal, les messages sont pris dans l'ordre d'arrivée. On obtient donc la priorité des transferts et FIFO entre demandes de même priorité.
 
-L'atomicité garantie ici concerne la concurrence dans le programme en fonctionnement. Ce n'est pas une garantie de conservation après un arrêt brutal de la machine : il n'y a ni sauvegarde ni journal durable.
+La priorité s'applique aux messages encore dans la file. Elle n'interrompt pas une transaction déjà extraite. Deux employés peuvent terminer dans un ordre différent de leur ordre d'extraction. Une arrivée continue de transferts pourrait retarder les consultations : aucun mécanisme de vieillissement n'est ajouté.
 
-Un transfert conserve le total de la banque. Un dépôt l'augmente ; un retrait le diminue. Cette propriété sert directement dans les tests.
+Le test de priorité remplit une file temporaire avec les types 3, 2, 1, 2 avant de lire. Il vérifie réellement l'ordre 1, 2, 2, 3 et l'ordre d'arrivée entre les deux messages de type 2, puis supprime cette file.
 
-## 8. La communication et le sens du mot IPC
+## 7. Pourquoi conserver un mutex ?
 
-Au sens strict, IPC désigne la communication entre processus. Ici, le sujet autorise aussi les threads distincts. Nous retenons cette possibilité et utilisons leur mémoire commune pour échanger des messages.
+Recevoir un message complet n'empêche pas les deux employés de modifier simultanément un compte. L'atomicité du transport et l'atomicité bancaire sont deux problèmes distincts.
 
-La file contient des pointeurs vers les requêtes. C'est possible parce que tous les threads appartiennent au même processus et partagent le même espace d'adressage. Un autre processus indépendant ne pourrait pas utiliser directement ces pointeurs.
+Chaque employé verrouille `verrou_comptes` avant d'appeler `executer()`, puis le libère après avoir obtenu la réponse. Les validations et les modifications sont donc dans la même section critique.
 
-Il s'agit donc d'une **file applicative en mémoire partagée entre threads**, et non d'une file de messages du système d'exploitation. Ce choix satisfait la variante par threads du sujet et reste accessible à un niveau intermédiaire.
+Pour deux retraits de 80 € sur un solde de 100 €, le premier employé accepte et laisse 20 €. Le second voit ensuite 20 € et refuse. Il ne peut pas utiliser un solde lu avant le premier retrait.
 
-## 9. Comprendre la démonstration
+Un transfert vérifie d'abord le propriétaire de la source, la validité du montant, la destination, la différence entre les comptes, les fonds et le plafond. Seulement ensuite il débite la source et crédite la destination, sous le même verrou. Un refus métier ne change aucun solde.
 
-Chaque client effectue successivement : dépôt de 100 €, retrait de 25 €, transfert de 50 € vers son deuxième compte, transfert de 10 € au client suivant, tentative de retrait excessif et consultation.
+Ce verrou global est simple et évite les problèmes de prise de deux verrous de comptes. Les clients sont concurrents, mais les modifications de soldes sont sérialisées. C'est un compromis volontaire pour un projet de niveau intermédiaire.
 
-Les trois clients exécutent leur liste en concurrence. Chaque client attend cependant la réponse de sa demande avant d'envoyer la suivante.
+## 8. Rôle des sémaphores et du tube au démarrage
 
-Sur une banque neuve :
+La banque crée un sémaphore POSIX anonyme :
 
-- Le total initial est `6 × 1 000 = 6 000 €`.
-- Les dépôts ajoutent `3 × 100 = 300 €`.
-- Les retraits acceptés enlèvent `3 × 25 = 75 €`.
-- Les transferts ne changent pas le total.
-- Les trois retraits excessifs sont refusés.
-- Le total final est donc `6 225 €`.
+```c
+sem_init(&employes_prets, 0, 0);
+```
 
-Les comptes 1, 3 et 5 terminent à 1 025 € ; les comptes 2, 4 et 6 à 1 050 €. Les soldes intermédiaires affichés peuvent varier selon l'ordre des transactions. Le mutex `affichage` évite de mélanger les lignes produites par les clients ; il ne protège pas les comptes.
+Le deuxième argument est zéro : le sémaphore est partagé entre les threads d'un même processus. Chaque employé signale son démarrage avec `sem_post`. Le thread principal de la banque effectue deux `sem_wait` avant de déclarer le service prêt.
 
-## 10. Démarrage et fermeture
+La banque transmet ensuite un octet `P` dans un tube créé avant le `fork`. Le parent attend cet octet avec `read`. Cela sert de confirmation : le parent ne commence pas les transactions tant que les deux employés ne sont pas initialisés.
 
-`banque_demarrer` initialise les comptes, les verrous et les sémaphores avant de créer les employés. Il faut l'appeler une seule fois par session bancaire.
+Le père ferme l'extrémité d'écriture et le fils celle de lecture. Après la confirmation, chacun ferme son descripteur restant. Si le serveur meurt avant d'écrire, le père reçoit une fin de fichier au lieu d'attendre éternellement un écrivain encore ouvert.
 
-À la fermeture, le programme attend d'abord la fin de tous les clients. Puis `banque_arreter` positionne le drapeau d'arrêt et envoie deux signaux pour réveiller les deux employés éventuellement bloqués sur une file vide. Chaque employé constate que la file est vide et que l'arrêt est demandé, puis termine.
+Un seul tube suffit, car cette confirmation ne va que de la banque vers le parent. Les échanges bancaires bidirectionnels utilisent leurs deux files distinctes.
 
-Le thread principal attend ensuite les employés avant de détruire les outils de synchronisation. Il ne faut pas appeler `banque_envoyer` après la fermeture, ni arrêter la banque alors que des clients continuent d'envoyer des demandes.
+## 9. Signaux et fermeture
 
-Les erreurs système de création ou d'attente des outils de synchronisation arrêtent le programme. Les refus métier, comme un solde insuffisant, renvoient simplement un statut et permettent de continuer.
+Dans le client, `sigaction` associe SIGINT et SIGTERM à un gestionnaire minimal qui positionne un `volatile sig_atomic_t`. On n'appelle pas `printf`, `waitpid` ou le nettoyage IPC depuis ce gestionnaire. Le code normal observe le drapeau et ferme la session.
 
-## 11. Windows et Linux
+La banque hérite de ces deux signaux bloqués avant la création de ses threads. Ses employés héritent aussi du masque. Le thread principal les reçoit de manière synchrone avec `sigwait`, sans exécuter un gestionnaire au milieu d'une transaction.
 
-`synchronisation.h` rassemble les différences entre systèmes : `CreateThread` et les objets Windows d'un côté, `pthread_create` et les sémaphores POSIX de l'autre.
+Pour quitter normalement :
 
-`#ifdef _WIN32` choisit la branche Windows pendant la compilation. Le reste du programme utilise des noms simples comme `thread_creer`, `mutex_prendre` ou `semaphore_attendre`.
+1. Le parent attend la fin des processus clients de la démonstration.
+2. Il envoie SIGTERM à la banque avec `kill`.
+3. La banque sort de `sigwait` et supprime les deux files avec `msgctl(..., IPC_RMID, NULL)`.
+4. Les employés bloqués sur `msgrcv` ou `msgsnd` sont réveillés avec une erreur de suppression.
+5. La banque attend ses employés avec `pthread_join`, détruit son sémaphore et son mutex, puis termine.
+6. Le parent récolte la banque avec `waitpid` et effectue un nettoyage de secours des files.
 
-Le mot `static inline` permet de définir ces petites fonctions dans l'en-tête sans conflit entre les fichiers C qui l'incluent. Il n'est pas nécessaire de maîtriser toute l'API Windows pour comprendre la logique bancaire.
+Les identifiants des files restent constants pendant que les employés les utilisent. On les invalide dans le parent seulement après l'arrêt.
 
-## 12. Ce que les tests vérifient
+SIGKILL ne peut pas être intercepté. Si le parent et le serveur sont tous les deux tués ainsi, aucun de leurs codes de nettoyage ne peut tourner. Les identifiants affichés au lancement permettent un nettoyage ciblé avec `ipcrm`.
 
-Les tests fonctionnels vérifient les soldes exacts, les transferts internes et externes, le retrait du solde exact, les droits sur les comptes, les entrées invalides, les fonds insuffisants et les plafonds. Ils vérifient aussi qu'un transfert refusé ne modifie aucun de ses deux comptes.
+## 10. Attentes et erreurs de communication
 
-Le test de priorité prépare une file connue sans signaler de travail aux employés, puis contrôle directement l'ordre d'extraction. Il est déterministe et ne dépend pas du hasard de l'ordonnanceur.
+Les employés attendent de manière bloquante sur une file vide. Les clients utilisent `IPC_NOWAIT`, une pause d'une milliseconde avec `nanosleep` et une échéance de cinq secondes mesurée avec `CLOCK_MONOTONIC`. Cela limite l'attente si le serveur disparaît sans avoir supprimé ses files.
 
-Deux scénarios utilisent chacun 24 threads et 100 requêtes par thread :
+Ce compromis est plus facile à comprendre qu'un mécanisme complet de surveillance et de reconnexion. Il entraîne de petites vérifications périodiques côté client, et un léger coût de latence dans les tests.
 
-1. Tous tentent de retirer 10 € du compte 1, initialement à 1 000 €. Exactement 100 retraits doivent réussir ; le solde final doit être zéro et les autres refus doivent être des insuffisances de fonds.
-2. La moitié transfère un centime du compte 1 au compte 3 ; l'autre moitié fait l'inverse. Les 2 400 transferts doivent réussir, les deux soldes doivent retrouver leur valeur initiale et le total rester à 6 000 €.
+`SERVICE_INDISPONIBLE` signifie qu'une réponse n'a pas pu être confirmée. Une demande déjà envoyée a pu être exécutée avant la perte de sa réponse. Il ne faut donc pas renvoyer automatiquement un dépôt ou un retrait : le programme quitte la session après cette erreur dans les opérations manuelles. Les refus métier, comme les fonds insuffisants, sont des résultats confirmés et permettent de continuer.
 
-Un sémaphore de départ rassemble les producteurs avant de les libérer. Il favorise leur concurrence sans garantir une exécution réellement simultanée sur 24 cœurs. Les 24 producteurs dépassent les 16 places de la file et sollicitent sa capacité limitée ; le test ne mesure pas le taux de remplissage.
+Les données ne sont pas persistantes ; une session n'a pas de reprise après panne. Le numéro de requête sert à reconnaître les réponses, pas à rendre les transactions rejouables.
 
-## 13. Ordre de lecture conseillé et présentation orale
+## 11. Montants et contrôles
 
-Lis d'abord les types dans `banque.h`, puis `executer` pour comprendre les règles bancaires. Suis ensuite `banque_envoyer` et `travailler` pour comprendre l'échange. Termine par la file prioritaire, le menu, les tests et l'adaptation système.
+Les montants sont des entiers en centimes. Pour lire `12,50`, le programme construit `12 * 100 + 50`, sans nombre flottant. Il refuse une troisième décimale, les valeurs non positives et les montants au-delà du plafond.
 
-Pour présenter le projet, tu peux dire :
+Le crédit vérifie la place restante avec `SOLDE_MAX - solde` avant d'additionner. Le transfert conserve le total de la banque. Un dépôt l'augmente et un retrait le diminue. Le calcul du total est lui-même une requête interne, effectuée sous le même mutex ; le parent ne consulte jamais une copie locale des comptes.
 
-> J'ai choisi la variante par threads autorisée par le sujet. Les clients déposent leurs requêtes dans une file partagée. Deux employés sélectionnent les demandes selon leur priorité. Un mutex protège la file et un autre protège les validations et modifications des comptes. Les sémaphores servent à attendre une place, une requête ou une réponse. Les montants sont stockés en centimes. Un transfert refusé ne modifie aucun solde et les tests concurrents vérifient notamment l'absence de découvert et la conservation de l'argent lors des transferts.
+## 12. Démonstration et tests
 
-Le projet est une simulation en console avec des identités fixes, des données temporaires et un verrou global. Ces choix sont assumés pour garder le code lisible et concentrer le travail sur la concurrence demandée dans le sujet.
+Chaque client de démonstration dépose 100 €, retire 25 €, transfère 50 € vers son deuxième compte et 10 € au client suivant, tente un retrait excessif puis consulte son solde.
+
+Sur une banque neuve, le total passe de 6 000 € à 6 225 €. Les comptes 1, 3, 5 terminent à 1 025 € ; les comptes 2, 4, 6 à 1 050 €. Les affichages intermédiaires dépendent de l'ordre d'exécution.
+
+Les tests C gardent les vérifications des règles initiales et créent maintenant 24 processus producteurs. Un tube libère leur départ ; un autre collecte leurs compteurs de résultats. Chaque processus effectue 100 demandes. Les résultats écrits dans le tube sont plus petits que `PIPE_BUF` et envoyés en une écriture, tandis que le lecteur gère une éventuelle lecture partielle.
+
+Le premier scénario concurrence des retraits de 10 € sur un compte à 1 000 € : exactement 100 réussites, puis des refus. Le second réalise 2 400 transferts d'un centime dans les deux sens : tous réussissent et les soldes initiaux sont retrouvés.
+
+Les tests système vérifient les PID, les trois threads de la banque, les files réelles dans `/proc/sysvipc/msg`, les signaux, la disparition du serveur, le nettoyage IPC et l'indépendance de deux sessions.
+
+## 13. Lien avec les cours et ordre de lecture
+
+| Support fourni | Partie mise en pratique |
+|---|---|
+| Processus, pages PDF 10 à 13 | `fork`, PID, attente et fin des enfants |
+| Tubes, pages PDF 2 à 8 | Tube de démarrage, fermeture des extrémités, lectures/écritures |
+| Signaux, pages PDF 3 à 5 et 9 à 11 | SIGINT/SIGTERM, envoi, gestion et masquage ; `sigwait` complète le mécanisme |
+| Files de messages, pages PDF 3 à 7 | Messages structurés, types, files System V et suppression |
+| Threads et sémaphores, pages PDF 5 à 12 et 15 à 25 | Employés, attente, mutex, sections critiques et sémaphores POSIX |
+
+La version utilise les notions de chacun des cinq supports sans chercher à appeler toutes les fonctions citées. Elle ne nécessite pas `exec`, `alarm`, `mkfifo`, `dup2`, ni un segment de mémoire partagée entre processus.
+
+Pour comprendre le code, commence par `banque.h`, puis `executer` dans `banque.c`. Suis ensuite `banque_envoyer`, `travailler`, `banque_demarrer` et `servir`. Termine par la démonstration dans `main.c` et les tests.
+
+Pour présenter le projet : « Les clients sont des processus distincts qui communiquent avec une banque par deux files System V. Deux threads employés sélectionnent les demandes selon leur type. Un mutex protège les comptes et les transferts. Un sémaphore et un tube confirment le démarrage. Les signaux permettent l'arrêt ; le serveur supprime ses files et le parent attend les processus enfants. »

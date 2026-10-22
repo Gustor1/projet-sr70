@@ -1,10 +1,12 @@
 #include "banque.h"
-#include "synchronisation.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
-
-static Mutex affichage;
 
 static void afficher_montant(Montant montant) {
     printf("%lld,%02lld EUR", montant / 100, montant % 100);
@@ -19,6 +21,7 @@ static void afficher_reponse(Reponse r) {
 /* fgets permet de rejeter une ligne incorrecte sans bloquer sur scanf. */
 static int lire_ligne(const char *question, char *texte, size_t taille) {
     int c;
+    if (banque_interrompue()) return 0;
     printf("%s", question);
     fflush(stdout);
     if (!fgets(texte, (int)taille, stdin)) return 0;
@@ -73,17 +76,19 @@ static int lire_montant(Montant *montant) {
     }
 }
 
-static void afficher_comptes(int client) {
+static int afficher_comptes(int client) {
     int compte;
     printf("Comptes de %s (client %d) :\n", banque_client(client), client);
     for (compte = client * 2 - 1; compte <= client * 2; compte++) {
+        Reponse rep = banque_envoyer(client, CONSULTATION, compte, 0, 0);
         printf("  Compte %d : ", compte);
-        afficher_reponse(banque_envoyer(client, CONSULTATION, compte, 0, 0));
+        afficher_reponse(rep);
+        if (rep.statut == SERVICE_INDISPONIBLE) return 0;
     }
+    return 1;
 }
 
-static FONCTION_THREAD client_demo(void *argument) {
-    int client = *(int *)argument;
+static int client_demo(int client) {
     int source = client * 2 - 1;
     int suivant = client % NB_CLIENTS + 1;
     Operation operations[] = { DEPOT, RETRAIT, TRANSFERT, TRANSFERT, RETRAIT, CONSULTATION };
@@ -94,40 +99,73 @@ static FONCTION_THREAD client_demo(void *argument) {
     for (i = 0; i < 6; i++) {
         int destination = i == 2 ? source + 1 : suivant * 2 - 1;
         Reponse r = banque_envoyer(client, operations[i], source, destination, montants[i]);
-        mutex_prendre(&affichage);
-        printf("[%s] %s : ", banque_client(client), libelles[i]);
-        afficher_reponse(r);
-        mutex_liberer(&affichage);
+        if (r.statut == SERVICE_INDISPONIBLE) {
+            printf("[%s PID=%ld] %s : %s\n", banque_client(client),
+                   (long)getpid(), libelles[i], banque_message(r.statut));
+            return 0;
+        }
+        printf("[%s PID=%ld] %s : %s | solde source : %lld,%02lld EUR\n",
+               banque_client(client), (long)getpid(), libelles[i],
+               banque_message(r.statut), r.solde / 100,
+               r.solde >= 0 ? r.solde % 100 : 0);
     }
-    return FIN_THREAD;
+    return 1;
 }
 
-static void demonstration(void) {
-    Thread clients[NB_CLIENTS];
-    int ids[NB_CLIENTS], i;
-    Montant avant = banque_total();
-    puts("\nTrois clients en parallele, deux employes bancaires.");
+static int demonstration(void) {
+    pid_t clients[NB_CLIENTS];
+    int nombre = 0, i, ok = 1;
+    Montant avant = banque_total(), apres;
+    if (avant < 0 || banque_interrompue()) return 0;
+    puts("\nTrois processus clients en parallele, deux threads employes dans la banque.");
+    fflush(NULL);
     for (i = 0; i < NB_CLIENTS; i++) {
-        ids[i] = i + 1;
-        thread_creer(&clients[i], client_demo, &ids[i]);
+        pid_t pid = fork();
+        if (pid == 0) {
+            int resultat = client_demo(i + 1);
+            fflush(stdout);
+            _exit(resultat ? EXIT_SUCCESS : EXIT_FAILURE);
+        }
+        if (pid == -1) { perror("fork client"); ok = 0; break; }
+        clients[nombre++] = pid;
     }
-    for (i = 0; i < NB_CLIENTS; i++) thread_attendre(clients[i]);
+    for (i = 0; i < nombre; i++) {
+        int statut;
+        pid_t attendu;
+        do {
+            int j;
+            if (banque_interrompue()) {
+                for (j = i; j < nombre; j++) kill(clients[j], SIGTERM);
+            }
+            attendu = waitpid(clients[i], &statut, 0);
+        } while (attendu == -1 && errno == EINTR);
+        if (attendu == -1 || !WIFEXITED(statut) || WEXITSTATUS(statut) != 0) ok = 0;
+    }
+    if (!ok || banque_interrompue()) return 0;
     puts("\nSoldes apres demonstration :");
-    for (i = 1; i <= NB_CLIENTS; i++) afficher_comptes(i);
+    for (i = 1; i <= NB_CLIENTS; i++) {
+        if (!afficher_comptes(i)) return 0;
+    }
+    apres = banque_total();
+    if (apres < 0) return 0;
     printf("Total avant : "); afficher_montant(avant);
-    printf(" | Total apres : "); afficher_montant(banque_total());
+    printf(" | Total apres : "); afficher_montant(apres);
     puts("\nSur une banque neuve : augmentation attendue de 225 EUR (depots - retraits).");
+    return 1;
 }
 
 int main(int argc, char **argv) {
-    int choix, client = 1, source, destination;
+    int choix, client = 1, source, destination, ok = 1;
     Montant montant;
+    setvbuf(stdout, NULL, _IOLBF, 0);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--demo") != 0)) {
         fprintf(stderr, "Usage : %s [--demo]\n", argv[0]); return EXIT_FAILURE;
     }
-    banque_demarrer();
-    mutex_creer(&affichage);
-    if (argc == 2) demonstration();
+    if (!banque_demarrer()) {
+        fprintf(stderr, "Impossible de demarrer la banque.\n"); return EXIT_FAILURE;
+    }
+    banque_decrire();
+    if (argc == 2) ok = demonstration();
     else {
         puts("SIMULATION BANCAIRE - 3 clients, 2 comptes de 1000 EUR chacun.");
         puts("Alice : 1,2 | Bob : 3,4 | Charlie : 5,6. Identites simulees, sans mot de passe.");
@@ -137,19 +175,24 @@ int main(int argc, char **argv) {
             if (!lire_entier("Choix : ", 0, 7, &choix) || choix == 0) break;
             if (choix == 5) {
                 if (!lire_entier("Client (1 Alice, 2 Bob, 3 Charlie) : ", 1, NB_CLIENTS, &client)) break;
-            } else if (choix == 6) afficher_comptes(client);
-            else if (choix == 7) demonstration();
+            } else if (choix == 6) {
+                if (!afficher_comptes(client)) { ok = 0; break; }
+            }
+            else if (choix == 7) {
+                if (!demonstration()) { ok = 0; break; }
+            }
             else {
                 destination = 0; montant = 0;
                 if (!lire_entier("Compte source : ", 1, NB_COMPTES, &source)) break;
                 if (choix == TRANSFERT && !lire_entier("Compte destinataire : ", 1, NB_COMPTES, &destination)) break;
                 if (choix != CONSULTATION && !lire_montant(&montant)) break;
-                afficher_reponse(banque_envoyer(client, (Operation)choix, source, destination, montant));
+                Reponse rep = banque_envoyer(client, (Operation)choix, source, destination, montant);
+                afficher_reponse(rep);
+                if (rep.statut == SERVICE_INDISPONIBLE) { ok = 0; break; }
             }
         }
     }
     banque_arreter();
-    mutex_detruire(&affichage);
     puts("Banque fermee proprement. Les donnees de simulation ne sont pas conservees.");
-    return EXIT_SUCCESS;
+    return banque_interrompue() ? 130 : (ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }

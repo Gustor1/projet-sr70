@@ -1,5 +1,9 @@
 #include "banque.h"
-#include "synchronisation.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 static int controles, echecs;
 #define VERIFIER(condition) do { controles++; if (!(condition)) { \
@@ -10,12 +14,8 @@ static Montant solde(int compte) {
 }
 
 typedef struct { int mode; int succes; int erreurs; } Travail;
-static Semaphore depart;
-
-static FONCTION_THREAD concurrence(void *argument) {
-    Travail *travail = argument;
+static void concurrence(Travail *travail) {
     int i;
-    semaphore_attendre(&depart);
     for (i = 0; i < 100; i++) {
         Reponse r;
         if (travail->mode == 0) r = banque_envoyer(1, RETRAIT, 1, 0, 1000);
@@ -24,38 +24,66 @@ static FONCTION_THREAD concurrence(void *argument) {
         if (r.statut == SUCCES) travail->succes++;
         else if (travail->mode != 0 || r.statut != FONDS_INSUFFISANTS) travail->erreurs++;
     }
-    return FIN_THREAD;
 }
 
 static void tester_concurrence(int retraits) {
-    /* 24 producteurs > 16 places : sollicite aussi l'attente sur file pleine. */
-    Thread threads[24];
-    Travail travaux[24];
-    int i, succes = 0, erreurs = 0;
-    banque_demarrer();
-    semaphore_creer(&depart, 0);
-    for (i = 0; i < 24; i++) {
-        travaux[i].mode = retraits ? 0 : (i % 2 + 1);
-        travaux[i].succes = travaux[i].erreurs = 0;
-        thread_creer(&threads[i], concurrence, &travaux[i]);
+    pid_t clients[24];
+    int depart[2], resultats[2];
+    int i, succes = 0, erreurs = 0, statut;
+    char jetons[24] = {0};
+    if (!banque_demarrer()) { VERIFIER(0); return; }
+    if (pipe(depart) == -1) { VERIFIER(0); banque_arreter(); return; }
+    if (pipe(resultats) == -1) {
+        VERIFIER(0); close(depart[0]); close(depart[1]); banque_arreter(); return;
     }
-    for (i = 0; i < 24; i++) semaphore_signaler(&depart);
+    fflush(NULL);
     for (i = 0; i < 24; i++) {
-        thread_attendre(threads[i]);
-        succes += travaux[i].succes;
-        erreurs += travaux[i].erreurs;
+        clients[i] = fork();
+        if (clients[i] == -1) { perror("fork test"); exit(EXIT_FAILURE); }
+        if (clients[i] == 0) {
+            Travail travail = { retraits ? 0 : (i % 2 + 1), 0, 0 };
+            char jeton;
+            close(depart[1]); close(resultats[0]);
+            if (read(depart[0], &jeton, 1) != 1) _exit(EXIT_FAILURE);
+            close(depart[0]);
+            concurrence(&travail);
+            /* Petit resultat ecrit en une fois dans un tube commun. */
+            if (write(resultats[1], &travail, sizeof travail) != sizeof travail) _exit(EXIT_FAILURE);
+            close(resultats[1]);
+            _exit(EXIT_SUCCESS);
+        }
+    }
+    close(depart[0]); close(resultats[1]);
+    VERIFIER(write(depart[1], jetons, sizeof jetons) == sizeof jetons);
+    close(depart[1]);
+    for (i = 0; i < 24; i++) {
+        Travail travail;
+        size_t recus = 0;
+        while (recus < sizeof travail) {
+            ssize_t lu = read(resultats[0], (char *)&travail + recus, sizeof travail - recus);
+            if (lu == -1 && errno == EINTR) continue;
+            if (lu <= 0) break;
+            recus += (size_t)lu;
+        }
+        VERIFIER(recus == sizeof travail);
+        if (recus == sizeof travail) { succes += travail.succes; erreurs += travail.erreurs; }
+    }
+    close(resultats[0]);
+    for (i = 0; i < 24; i++) {
+        pid_t pid;
+        do { pid = waitpid(clients[i], &statut, 0); } while (pid == -1 && errno == EINTR);
+        VERIFIER(pid == clients[i] && WIFEXITED(statut) && WEXITSTATUS(statut) == 0);
     }
     VERIFIER(erreurs == 0);
     VERIFIER(succes == (retraits ? 100 : 2400));
     VERIFIER(solde(1) == (retraits ? 0 : 100000));
     VERIFIER(solde(3) == 100000);
     VERIFIER(banque_total() == (retraits ? 500000 : 600000));
-    semaphore_detruire(&depart);
     banque_arreter();
 }
 
 int main(void) {
-    banque_demarrer();
+    if (!banque_demarrer()) { fprintf(stderr, "Demarrage impossible\n"); return EXIT_FAILURE; }
     VERIFIER(banque_test_priorites());
     VERIFIER(banque_total() == 600000);
     VERIFIER(banque_envoyer(1, DEPOT, 1, 0, 1234).statut == SUCCES);

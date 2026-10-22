@@ -1,95 +1,113 @@
-# Simulation de système bancaire en C
+# Simulation bancaire SR70 en C
 
-Projet pédagogique réalisé à partir du sujet **Simulation Avancée de Système Bancaire** (`banque.pdf`). Toutes les fonctionnalités proposées dans le document sont couvertes : comptes multiples, dépôt, retrait, transfert, consultation, priorités, concurrence, protection des transactions et échange requête/réponse.
+Version console Linux, adaptée aux cours de processus, tubes, signaux, files de messages, threads et sémaphores. Trois clients possèdent chacun deux comptes et peuvent déposer, retirer, transférer et consulter leur solde.
 
-Le code reste volontairement accessible : tableaux de taille fixe, structures, fonctions, deux mutex et des sémaphores. Pas de bibliothèque externe ni de base de données.
+La banque est un processus distinct. Ses deux threads employés reçoivent des demandes par **files de messages System V** et protègent les comptes avec un mutex POSIX. La démonstration crée trois processus clients avec `fork`.
 
-## Démarrer sous Windows
+## Lancer depuis Windows / CMD
 
-Prérequis : GCC (MinGW) accessible avec `gcc --version`. Dans PowerShell, depuis ce dossier :
+Ubuntu via WSL est nécessaire pour les appels Linux étudiés en cours. Le lanceur ne les émule pas avec l'API Windows.
 
-```powershell
-./build.ps1 -Test -Demo
-./build/banque.exe
+Depuis CMD, dans le dossier du projet :
+
+```bat
+lancer.cmd
 ```
 
-La première commande compile les deux exécutables, lance les tests puis la démonstration. La seconde ouvre le menu interactif sur une nouvelle banque.
-
-Si la politique PowerShell bloque les scripts, compiler directement :
+Ou depuis PowerShell :
 
 ```powershell
-mkdir build -Force
-gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -Isrc src/main.c src/banque.c -o build/banque.exe
-gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -Isrc tests/test_banque.c src/banque.c -o build/test_banque.exe
-./build/test_banque.exe
-./build/banque.exe --demo
-./build/banque.exe
+./build.ps1 -Run
+./build.ps1 -Test -Systeme -Demo
 ```
 
-## Démarrer sous Linux
+Le script utilise Ubuntu par défaut. Pour une autre distribution WSL :
 
-Avec GCC, Make et les bibliothèques système POSIX :
+```powershell
+./build.ps1 -Distribution Debian -Run
+```
+
+Prérequis dans la distribution : GCC, Make, et Python 3 uniquement pour les tests système optionnels. Aucun paquet C tiers n'est nécessaire. Le programme compilé est `build/banque`, un exécutable Linux ; l'ancien `build/banque.exe` Windows ne correspond plus à cette version.
+
+## Lancer directement sous Linux
 
 ```sh
-make test
-make demo
+make
 ./build/banque
 ```
 
-La version Windows a été compilée et exécutée sur la machine de travail. La branche POSIX est fournie pour Linux, mais n'a pas été exécutée ici. Le Makefile vise Linux ; sous Windows, utiliser les commandes ci-dessus.
+Pour vérifier et démontrer :
 
-## Utilisation
+```sh
+make test            # tests C des règles bancaires et de la concurrence
+make test-systeme    # tests Python des processus, signaux et ressources IPC
+make demo            # trois processus clients en concurrence
+```
 
-Chaque lancement initialise cette banque :
+Sous WSL, on peut aussi ouvrir Ubuntu, aller dans le dossier monté sous `/mnt/c/...`, puis utiliser ces commandes.
 
-| Identifiant client | Nom | Comptes | Solde initial par compte |
+## Utilisation du menu
+
+| Client | Identifiant | Comptes | Solde initial par compte |
 |---|---|---|---|
-| 1 | Alice | 1 et 2 | 1 000,00 € |
-| 2 | Bob | 3 et 4 | 1 000,00 € |
-| 3 | Charlie | 5 et 6 | 1 000,00 € |
+| Alice | 1 | 1 et 2 | 1 000,00 € |
+| Bob | 2 | 3 et 4 | 1 000,00 € |
+| Charlie | 3 | 5 et 6 | 1 000,00 € |
 
-Alice est sélectionnée au démarrage. Le menu permet de :
+Alice est sélectionnée au démarrage. Les choix sont :
 
-1. Déposer de l'argent sur un de ses comptes.
-2. Retirer de l'argent de l'un de ses comptes.
-3. Transférer de l'argent vers son deuxième compte ou un compte d'un autre client.
-4. Consulter le solde d'un de ses comptes.
-5. Changer de client.
-6. Afficher les deux comptes du client actif.
-7. Lancer trois clients simultanément sur les soldes actuels.
-0. Quitter proprement.
+1. Dépôt sur un de ses comptes.
+2. Retrait d'un de ses comptes.
+3. Transfert entre ses comptes ou vers un autre client.
+4. Consultation du compte choisi.
+5. Changement de client.
+6. Consultation des deux comptes du client actif.
+7. Démonstration concurrente sur les soldes actuels.
+0. Fermeture.
 
-Les montants acceptent `12`, `12,5`, `12,50` ou `12.50`. Les valeurs négatives, nulles, trop grandes ou avec plus de deux décimales sont refusées. Une fin d'entrée (EOF) ferme proprement l'application.
+Les montants acceptent `12`, `12,5`, `12,50` ou `12.50`. Les montants non positifs, trop grands ou avec plus de deux décimales sont refusés. Le solde maximal est d'un milliard d'euros par compte. Les montants sont représentés en centimes entiers.
 
-**Exemple :** choisir `3`, puis source `1`, destination `3`, montant `50`. Alice envoie 50 € à Bob. Choisir ensuite `6` pour voir les comptes d'Alice, puis `5` et `2` pour devenir Bob et consulter le compte 3.
+Exemple : choisir `3`, compte source `1`, destinataire `3`, montant `50`. Alice transfère 50 € à Bob. Changer ensuite de client pour consulter le compte 3.
 
-Le choix du client simule une identité ; ce n'est pas une authentification. Les données sont uniquement en mémoire et repartent de zéro à chaque lancement. La démonstration du menu modifie les comptes existants, sans les réinitialiser.
+La sélection d'un client est une simulation d'identité, sans authentification. Les données restent en mémoire et sont réinitialisées au lancement. La démonstration du menu modifie les soldes de la session.
 
-## Fichiers à lire
+## Notions du cours mises en œuvre
 
-| Fichier | Rôle |
+| Notion | Utilisation concrète |
 |---|---|
-| `src/banque.h` | Types et fonctions publiques |
-| `src/banque.c` | Comptes, validations, file prioritaire et employés |
-| `src/main.c` | Menu, lecture des montants, démonstration |
-| `src/synchronisation.h` | Adaptation threads/mutex/sémaphores Windows et Linux |
-| `tests/test_banque.c` | Tests fonctionnels et concurrents |
-| `EXPLICATIONS.md` | Explication détaillée du fonctionnement |
-| `VALIDATION.md` | Vérifications réellement exécutées et limites |
+| `fork`, `getpid`, `waitpid`, `_exit` | Banque séparée, clients de démonstration, attente des enfants |
+| `pipe`, `read`, `write`, `close` | Confirmation du démarrage de la banque ; synchronisation et résultats des tests |
+| `msgget`, `msgsnd`, `msgrcv`, `msgctl` | Deux files système pour les requêtes et réponses |
+| Types de messages et priorités | Transfert de type 1, dépôt/retrait de type 2, consultation de type 3 |
+| `pthread_create`, `pthread_join` | Deux employés dans le processus banque |
+| `pthread_mutex_*` | Protection atomique des validations et changements de soldes |
+| `sem_init`, `sem_wait`, `sem_post`, `sem_destroy` | Attente du démarrage des deux employés |
+| `sigaction`, `sigprocmask`, `sigwait`, `kill` | Interruption client et arrêt coordonné du serveur |
+| `IPC_RMID` | Suppression des files à la fermeture |
 
-## Correspondance avec le sujet
+Les tubes et files ont des rôles distincts : le tube transmet l'octet de confirmation de démarrage ; les files transportent les transactions structurées. Il n'est pas nécessaire d'ajouter `exec`, `alarm`, `mkfifo` et `dup2` pour les utiliser artificiellement.
 
-| Fonctionnalité du PDF | Réalisation |
-|---|---|
-| Plusieurs clients et comptes | Trois clients, deux comptes chacun |
-| Dépôt, retrait, consultation | `executer`, accessible par le menu et les threads clients |
-| Transfert interne et vers un autre client | Même opération, destination libre parmi les six comptes |
-| Priorisation | Transfert > dépôt/retrait > consultation ; FIFO à priorité égale |
-| Clients concurrents | Trois threads de démonstration ; 24 producteurs dans les tests |
-| Banque distincte des clients | Deux threads employés consomment la file |
-| Verrouillage | Mutex des comptes et mutex de la file |
-| Transactions atomiques | Validation puis modification sous le même verrou |
-| Échec si fonds insuffisants | Réponse explicite, aucun changement des soldes |
-| Communication et réponse | File en mémoire partagée, sémaphores et réponse dédiée par requête |
+## Observer les mécanismes
 
-**Choix concernant l'IPC :** le document autorise explicitement « processus ou threads distincts ». Ce projet choisit les threads : la communication utilise donc la mémoire commune du processus, une file de messages construite dans le programme et des sémaphores. Il ne prétend pas utiliser une file IPC système entre processus séparés. Si une consigne supplémentaire impose `fork`, des pipes ou une file System V, cette variante ne suffit pas ; il faudrait adapter l'architecture.
+Au démarrage, le programme affiche les PID et les identifiants des deux files. Dans un autre terminal de la **même distribution Linux/WSL** :
+
+```sh
+ipcs -q
+ps -eLf | grep banque
+```
+
+`Ctrl+C` ou `SIGTERM` provoque un arrêt coordonné. Le parent attend la banque et les clients ; les files sont supprimées. `SIGKILL` n'est pas interceptable : si tous les processus sont tués brutalement, des files peuvent rester. Supprimer alors uniquement les identifiants affichés par cette session avec `ipcrm -q IDENTIFIANT`.
+
+## Comprendre et vérifier
+
+- [EXPLICATIONS.md](EXPLICATIONS.md) : architecture, messages, verrous et fonctions expliqués.
+- [VALIDATION.md](VALIDATION.md) : résultats réellement exécutés sous Ubuntu/WSL.
+- `src/banque.h` : interface publique.
+- `src/banque.c` : transport IPC, processus banque et règles bancaires.
+- `src/main.c` : menu et processus clients de la démonstration.
+- `tests/test_banque.c` : tests C.
+- `tests/test_systeme.py` : tests système optionnels.
+
+La priorité porte sur la sélection des messages encore en attente. Une requête déjà extraite n'est pas préemptée et l'ordre de fin des deux employés peut différer de l'ordre de sélection.
+
+Si une réponse ne peut pas être confirmée sous cinq secondes ou si une interruption survient, l'opération retourne `SERVICE_INDISPONIBLE`. Cela ne garantit pas l'annulation d'une demande déjà envoyée : le programme n'effectue pas de renvoi automatique.

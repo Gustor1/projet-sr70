@@ -1,18 +1,23 @@
-param([switch]$Test, [switch]$Demo)
+param([switch]$Test, [switch]$Systeme, [switch]$Demo, [switch]$Run, [string]$Distribution = 'Ubuntu')
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 try {
-    New-Item -ItemType Directory -Force build | Out-Null
-    & gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -Isrc src/main.c src/banque.c -o build/banque.exe
-    if ($LASTEXITCODE -ne 0) { throw 'Compilation de la banque echouee.' }
-    & gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -Isrc tests/test_banque.c src/banque.c -o build/test_banque.exe
-    if ($LASTEXITCODE -ne 0) { throw 'Compilation des tests echouee.' }
+    & wsl.exe -d $Distribution --cd $PSScriptRoot -- make all
+    if ($LASTEXITCODE -ne 0) { throw 'Compilation Linux echouee. Verifier WSL, GCC et Make dans Ubuntu.' }
     if ($Test) {
-        & ./build/test_banque.exe
+        & wsl.exe -d $Distribution --cd $PSScriptRoot -- make test
         if ($LASTEXITCODE -ne 0) { throw 'Tests echoues.' }
     }
     if ($Demo) {
-        & ./build/banque.exe --demo
+        & wsl.exe -d $Distribution --cd $PSScriptRoot -- ./build/banque --demo
         if ($LASTEXITCODE -ne 0) { throw 'Demonstration echouee.' }
+    }
+    if ($Systeme) {
+        & wsl.exe -d $Distribution --cd $PSScriptRoot -- make test-systeme
+        if ($LASTEXITCODE -ne 0) { throw 'Tests systeme echoues.' }
+    }
+    if ($Run) {
+        & wsl.exe -d $Distribution --cd $PSScriptRoot -- ./build/banque
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 130) { throw 'Execution interrompue par une erreur.' }
     }
 } finally { Pop-Location }

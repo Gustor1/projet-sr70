@@ -10,16 +10,19 @@ typedef enum { DEPOT = 1, RETRAIT, TRANSFERT, CONSULTATION } Operation;
 typedef enum {
     SUCCES, CLIENT_INVALIDE, COMPTE_INVALIDE, ACCES_REFUSE,
     MONTANT_INVALIDE, FONDS_INSUFFISANTS, PLAFOND_DEPASSE,
-    MEME_COMPTE, OPERATION_INVALIDE
+    MEME_COMPTE, OPERATION_INVALIDE, SERVICE_INDISPONIBLE
 } Statut;
 typedef struct {
     Statut statut;
     Montant solde; /* Solde source apres operation, -1 si non consultable. */
 } Reponse;
 
-/* Demarrer une fois, puis arreter apres avoir rejoint tous les clients. */
-void banque_demarrer(void);
+/* Linux : demarrer avant les fork clients, arreter apres leurs waitpid.
+   Un seul appel en cours par processus client. Retour : 1 si prete, 0 sinon. */
+int banque_demarrer(void);
 void banque_arreter(void);
+int banque_interrompue(void);
+void banque_decrire(void);
 Reponse banque_envoyer(int client, Operation operation, int source,
                        int destination, Montant montant);
 const char *banque_message(Statut statut);
