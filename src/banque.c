@@ -6,12 +6,13 @@
 #include <signal.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <string.h>
 #include <sys/msg.h>
+#include <sys/shm.h>
 #include <sys/wait.h>
 #include <time.h>
 
 #define NB_EMPLOYES 2
-#define TOTAL_INTERNE 5
 #define DELAI_MAX 5
 
 typedef struct { int proprietaire; Montant solde; } Compte;
@@ -29,12 +30,20 @@ typedef struct {
     struct { unsigned numero; Reponse resultat; } corps;
 } MessageReponse;
 
-/* Les comptes sont utilises uniquement dans le processus banque.
+/* Contenu du segment de memoire partagee. Le semaphore doit etre DANS le
+   segment : apres fork, une variable ordinaire serait copiee, pas partagee. */
+typedef struct {
+    sem_t verrou;        /* sem_init(..., 1, 1) : binaire, partage entre processus. */
+    TableauBord donnees; /* Ecrit par la banque, lu par le processus principal. */
+} SegmentPartage;
+
+/* Les comptes sont modifies uniquement dans le processus banque.
    Les clients heritent des identifiants IPC par fork, pas des soldes vivants. */
 static Compte comptes[NB_COMPTES];
 static pthread_mutex_t verrou_comptes;
 static sem_t employes_prets;
-static int demandes = -1, reponses = -1;
+static int demandes = -1, reponses = -1, segment = -1;
+static SegmentPartage *partage = NULL;
 static pid_t serveur = -1, proprietaire = -1;
 static volatile sig_atomic_t interruption;
 
@@ -81,12 +90,6 @@ static Reponse executer(const MessageRequete *message) {
     const Montant montant = message->corps.montant;
     Reponse rep = { SUCCES, -1 };
     Compte *source, *destination;
-    if (operation == TOTAL_INTERNE) {
-        int i;
-        rep.solde = 0;
-        for (i = 0; i < NB_COMPTES; i++) rep.solde += comptes[i].solde;
-        return rep;
-    }
     if (client < 1 || client > NB_CLIENTS) {
         rep.statut = CLIENT_INVALIDE; return rep;
     }
@@ -130,6 +133,21 @@ static Reponse executer(const MessageRequete *message) {
     return rep;
 }
 
+/* Recopie les comptes dans le segment partage. Appelee sous verrou_comptes :
+   l'ordre des verrous est toujours mutex puis semaphore, donc pas d'interblocage. */
+static void publier(const Reponse *resultat) {
+    int i;
+    while (sem_wait(&partage->verrou) == -1 && errno == EINTR) { } /* P() */
+    partage->donnees.total = 0;
+    for (i = 0; i < NB_COMPTES; i++) {
+        partage->donnees.soldes[i] = comptes[i].solde;
+        partage->donnees.total += comptes[i].solde;
+    }
+    if (resultat && resultat->statut == SUCCES) partage->donnees.reussies++;
+    else if (resultat) partage->donnees.refusees++;
+    sem_post(&partage->verrou); /* V() */
+}
+
 static void *travailler(void *argument) {
     (void)argument;
     sem_post(&employes_prets);
@@ -146,6 +164,7 @@ static void *travailler(void *argument) {
         rep.corps.numero = req.corps.numero;
         pthread_mutex_lock(&verrou_comptes);
         rep.corps.resultat = executer(&req);
+        publier(&rep.corps.resultat); /* Avant la reponse : le client voit un tableau a jour. */
         pthread_mutex_unlock(&verrou_comptes);
         while (msgsnd(reponses, &rep, sizeof rep.corps, 0) == -1) {
             if (errno != EINTR) return NULL;
@@ -160,6 +179,18 @@ static void supprimer_files(void) {
     /* Ne pas modifier les identifiants pendant que les employes les lisent. */
 }
 
+/* Appelee par le processus principal seulement, quand la banque est terminee.
+   shmdt detache ; seul shmctl(IPC_RMID) detruit le segment. */
+static void supprimer_segment(void) {
+    if (partage != NULL) {
+        sem_destroy(&partage->verrou);
+        shmdt(partage);
+        partage = NULL;
+    }
+    if (segment != -1) shmctl(segment, IPC_RMID, NULL);
+    segment = -1;
+}
+
 /* SIGINT et SIGTERM sont bloques dans tous les threads du serveur.
    Son thread principal les attend avec sigwait, puis nettoie normalement. */
 static void servir(int tube_pret, const sigset_t *signaux) {
@@ -172,6 +203,7 @@ static void servir(int tube_pret, const sigset_t *signaux) {
         comptes[i].proprietaire = i / 2 + 1;
         comptes[i].solde = 100000;
     }
+    publier(NULL); /* Soldes initiaux visibles avant la premiere transaction. */
     for (i = 0; i < NB_EMPLOYES; i++) {
         if (pthread_create(&employes[i], NULL, travailler, NULL) != 0) {
             supprimer_files(); _exit(EXIT_FAILURE);
@@ -192,6 +224,7 @@ static void servir(int tube_pret, const sigset_t *signaux) {
     for (i = 0; i < NB_EMPLOYES; i++) pthread_join(employes[i], NULL);
     sem_destroy(&employes_prets);
     pthread_mutex_destroy(&verrou_comptes);
+    shmdt(partage); /* Le parent garde son attachement et supprimera le segment. */
     _exit(EXIT_SUCCESS);
 }
 
@@ -211,12 +244,23 @@ int banque_demarrer(void) {
     if (demandes == -1) return 0;
     reponses = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
     if (reponses == -1) { supprimer_files(); return 0; }
-    if (pipe(tube) == -1) { supprimer_files(); return 0; }
+    /* Segment cree et attache AVANT fork : la banque herite de l'attachement. */
+    segment = shmget(IPC_PRIVATE, sizeof(SegmentPartage), IPC_CREAT | 0600);
+    if (segment == -1) { supprimer_files(); return 0; }
+    partage = shmat(segment, NULL, 0);
+    if (partage == (void *)-1) {
+        partage = NULL; supprimer_segment(); supprimer_files(); return 0;
+    }
+    memset(partage, 0, sizeof *partage);
+    if (sem_init(&partage->verrou, 1, 1) == -1) {
+        shmdt(partage); partage = NULL; supprimer_segment(); supprimer_files(); return 0;
+    }
+    if (pipe(tube) == -1) { supprimer_segment(); supprimer_files(); return 0; }
     sigemptyset(&signaux);
     sigaddset(&signaux, SIGINT);
     sigaddset(&signaux, SIGTERM);
     if (sigprocmask(SIG_BLOCK, &signaux, &ancien_masque) == -1) {
-        close(tube[0]); close(tube[1]); supprimer_files(); return 0;
+        close(tube[0]); close(tube[1]); supprimer_segment(); supprimer_files(); return 0;
     }
     fflush(NULL);
     serveur = fork();
@@ -226,7 +270,7 @@ int banque_demarrer(void) {
     }
     close(tube[1]);
     sigprocmask(SIG_SETMASK, &ancien_masque, NULL);
-    if (serveur == -1) { close(tube[0]); supprimer_files(); return 0; }
+    if (serveur == -1) { close(tube[0]); supprimer_segment(); supprimer_files(); return 0; }
     do { lu = read(tube[0], &pret, 1); } while (lu == -1 && errno == EINTR && !interruption);
     close(tube[0]);
     if (lu != 1 || pret != 'P' || interruption) {
@@ -286,16 +330,32 @@ void banque_arreter(void) {
     }
     supprimer_files();
     demandes = reponses = -1;
+    supprimer_segment(); /* Apres waitpid : plus aucun employe ne peut ecrire. */
 }
 
 void banque_decrire(void) {
-    printf("Client PID=%ld | Banque PID=%ld | Files requetes=%d reponses=%d\n",
-           (long)getpid(), (long)serveur, demandes, reponses);
+    printf("Client PID=%ld | Banque PID=%ld | Files requetes=%d reponses=%d | Memoire partagee=%d\n",
+           (long)getpid(), (long)serveur, demandes, reponses, segment);
+}
+
+/* Lecture sans appel systeme pour les donnees elles-memes : seul le semaphore
+   en demande. L'attente est bornee au cas ou la banque serait tuee verrou pris. */
+int banque_lire_tableau(TableauBord *copie) {
+    struct timespec limite;
+    if (partage == NULL || interruption) return 0;
+    clock_gettime(CLOCK_REALTIME, &limite);
+    limite.tv_sec += DELAI_MAX;
+    while (sem_timedwait(&partage->verrou, &limite) == -1) {
+        if (errno != EINTR || interruption) return 0;
+    }
+    *copie = partage->donnees; /* Copie coherente : la banque ne peut pas ecrire. */
+    sem_post(&partage->verrou);
+    return 1;
 }
 
 Montant banque_total(void) {
-    Reponse rep = banque_envoyer(0, (Operation)TOTAL_INTERNE, 0, 0, 0);
-    return rep.statut == SUCCES ? rep.solde : -1;
+    TableauBord tableau;
+    return banque_lire_tableau(&tableau) ? tableau.total : -1;
 }
 
 int banque_test_priorites(void) {

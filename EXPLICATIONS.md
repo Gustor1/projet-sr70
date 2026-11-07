@@ -21,6 +21,7 @@ Processus principal : menu et supervision
     +-- fork --> Client Charlie (pendant la démonstration)
 
 Clients -- file de requêtes --> banque -- file de réponses --> clients
+Banque  -- écrit -->  [segment de mémoire partagée]  -- lu par --> processus principal
 ```
 
 Le processus principal joue lui-même le rôle du client lorsque tu utilises le menu. Le changement Alice/Bob/Charlie choisit une identité simulée. Le choix 7 crée réellement trois processus clients supplémentaires.
@@ -37,7 +38,9 @@ Les six comptes sont un tableau utilisé uniquement par la banque. Chaque compte
 
 Après `fork`, deux processus ne partagent pas automatiquement les changements de leurs variables ordinaires. Un client n'accède donc jamais au tableau pour consulter un solde. Il envoie un message au serveur, qui détient les valeurs à jour.
 
-Les deux threads employés partagent, eux, la mémoire du processus banque. Ils peuvent accéder aux mêmes comptes, avec un mutex pour les protéger. Aucun segment `shmget` n'est nécessaire dans cette architecture.
+Les deux threads employés partagent, eux, la mémoire du processus banque. Ils peuvent accéder aux mêmes comptes, avec un mutex pour les protéger.
+
+Les comptes « officiels » restent donc dans la banque. Une **copie publiée** existe en plus dans un segment de mémoire partagée : c'est le tableau de bord expliqué à la section 8 bis. Les clients ne modifient jamais ce segment ; seule la banque y écrit.
 
 ## 4. Création des files System V
 
@@ -77,7 +80,7 @@ Avec l'API System V, le plus petit type représente ici la plus haute priorité 
 |---|---|
 | Transfert | 1 |
 | Dépôt / retrait | 2 |
-| Consultation / total interne | 3 |
+| Consultation | 3 |
 
 Les employés appellent :
 
@@ -119,6 +122,63 @@ Le père ferme l'extrémité d'écriture et le fils celle de lecture. Après la 
 
 Un seul tube suffit, car cette confirmation ne va que de la banque vers le parent. Les échanges bancaires bidirectionnels utilisent leurs deux files distinctes.
 
+## 8 bis. Mémoire partagée : le tableau de bord
+
+### Pourquoi un segment partagé ?
+
+Le cours compare les deux approches : une file de messages demande un appel système à chaque envoi ou lecture, alors qu'un segment attaché avec `shmat` se lit comme une variable ordinaire. Le projet utilise donc **les deux, chacune pour ce qu'elle fait bien** :
+
+- les **files** transportent les transactions, car il faut une demande, une priorité et une réponse adressée au bon client ;
+- la **mémoire partagée** expose l'état de la banque (six soldes, total, compteurs de requêtes), que le processus principal lit sans déranger les employés et sans passer par la file.
+
+### Contenu et création
+
+```c
+typedef struct {
+    sem_t verrou;         /* sémaphore binaire entre processus */
+    TableauBord donnees;  /* soldes[6], total, reussies, refusees */
+} SegmentPartage;
+```
+
+Dans `banque_demarrer()`, **avant** le `fork` de la banque :
+
+```c
+segment = shmget(IPC_PRIVATE, sizeof(SegmentPartage), IPC_CREAT | 0600);
+partage = shmat(segment, NULL, 0);   /* NULL : le système choisit l'adresse */
+sem_init(&partage->verrou, 1, 1);    /* 1 = entre processus, valeur 1 = libre */
+```
+
+Le fils banque hérite de l'attachement : il n'a pas besoin de rappeler `shmat`. Comme pour les files, `IPC_PRIVATE` suffit car les processus ont un lien de parenté (pas besoin de `ftok`).
+
+### Pourquoi le sémaphore est DANS le segment
+
+Le cours montre `sem_init(&s, 1, 0)` pour synchroniser un père et un fils. Ce `1` ne suffit pas à lui seul : si `s` était une variable globale ordinaire, `fork` en ferait une **copie** dans le fils, et père et fils manipuleraient deux sémaphores différents. Le sémaphore doit donc être placé dans une mémoire réellement partagée, ici le segment lui-même.
+
+### Synchronisation
+
+La mémoire partagée n'offre aucune synchronisation native. Sans protection, le principal pourrait lire le tableau pendant qu'un employé n'a recopié que la moitié des soldes, et voir un total faux.
+
+- **Écriture** (`publier()` dans la banque) : `sem_wait` (P), recopie des six soldes, du total et du compteur, `sem_post` (V).
+- **Lecture** (`banque_lire_tableau()` dans le principal) : P, copie de toute la structure, V. On travaille ensuite sur la copie locale.
+
+`publier()` est appelée par l'employé **pendant qu'il tient encore le mutex** des comptes, juste après `executer()`. Deux conséquences :
+
+1. Les publications se font dans le même ordre que les transactions : le tableau n'est jamais « en retard » d'une opération puis « en avance » d'une autre.
+2. Elle a lieu **avant** l'envoi de la réponse : quand un client reçoit sa réponse, le tableau en tient déjà compte.
+
+Les verrous sont toujours pris dans le même ordre (mutex puis sémaphore) et le lecteur ne prend que le sémaphore : aucun interblocage n'est possible.
+
+Côté lecture, l'attente est bornée avec `sem_timedwait` (cinq secondes) : si la banque était tuée par SIGKILL exactement pendant qu'elle tenait le sémaphore, le principal ne resterait pas bloqué.
+
+### Fin de vie du segment
+
+- La banque appelle `shmdt` avant `_exit` (le noyau le ferait aussi automatiquement).
+- Le principal, **après** `waitpid` de la banque, appelle `sem_destroy`, `shmdt`, puis `shmctl(segment, IPC_RMID, NULL)`.
+
+Comme le cours l'indique, `shmdt` ne détruit pas le segment : seul `shmctl(IPC_RMID)` le fait. Après `shmdt`, l'adresse ne doit plus être utilisée ; c'est pourquoi `partage` est remis à `NULL` et `banque_lire_tableau()` renvoie alors 0.
+
+`banque_total()` lit maintenant le total dans ce segment. Avant, il passait par une requête interne spéciale dans la file ; cette requête a été retirée.
+
 ## 9. Signaux et fermeture
 
 Dans le client, `sigaction` associe SIGINT et SIGTERM à un gestionnaire minimal qui positionne un `volatile sig_atomic_t`. On n'appelle pas `printf`, `waitpid` ou le nettoyage IPC depuis ce gestionnaire. Le code normal observe le drapeau et ferme la session.
@@ -131,12 +191,12 @@ Pour quitter normalement :
 2. Il envoie SIGTERM à la banque avec `kill`.
 3. La banque sort de `sigwait` et supprime les deux files avec `msgctl(..., IPC_RMID, NULL)`.
 4. Les employés bloqués sur `msgrcv` ou `msgsnd` sont réveillés avec une erreur de suppression.
-5. La banque attend ses employés avec `pthread_join`, détruit son sémaphore et son mutex, puis termine.
-6. Le parent récolte la banque avec `waitpid` et effectue un nettoyage de secours des files.
+5. La banque attend ses employés avec `pthread_join`, détruit son sémaphore et son mutex, détache le segment avec `shmdt`, puis termine.
+6. Le parent récolte la banque avec `waitpid`, effectue un nettoyage de secours des files, puis détruit le sémaphore partagé et supprime le segment avec `shmctl(..., IPC_RMID, NULL)`.
 
 Les identifiants des files restent constants pendant que les employés les utilisent. On les invalide dans le parent seulement après l'arrêt.
 
-SIGKILL ne peut pas être intercepté. Si le parent et le serveur sont tous les deux tués ainsi, aucun de leurs codes de nettoyage ne peut tourner. Les identifiants affichés au lancement permettent un nettoyage ciblé avec `ipcrm`.
+SIGKILL ne peut pas être intercepté. Si le parent et le serveur sont tous les deux tués ainsi, aucun de leurs codes de nettoyage ne peut tourner. Les identifiants affichés au lancement permettent un nettoyage ciblé avec `ipcrm -q` (files) et `ipcrm -m` (segment).
 
 ## 10. Attentes et erreurs de communication
 
@@ -152,7 +212,7 @@ Les données ne sont pas persistantes ; une session n'a pas de reprise après pa
 
 Les montants sont des entiers en centimes. Pour lire `12,50`, le programme construit `12 * 100 + 50`, sans nombre flottant. Il refuse une troisième décimale, les valeurs non positives et les montants au-delà du plafond.
 
-Le crédit vérifie la place restante avec `SOLDE_MAX - solde` avant d'additionner. Le transfert conserve le total de la banque. Un dépôt l'augmente et un retrait le diminue. Le calcul du total est lui-même une requête interne, effectuée sous le même mutex ; le parent ne consulte jamais une copie locale des comptes.
+Le crédit vérifie la place restante avec `SOLDE_MAX - solde` avant d'additionner. Le transfert conserve le total de la banque. Un dépôt l'augmente et un retrait le diminue. Le total est calculé par la banque sous le mutex, puis publié dans le segment partagé ; le parent ne recalcule jamais à partir d'une copie locale ancienne des comptes.
 
 ## 12. Démonstration et tests
 
@@ -164,7 +224,9 @@ Les tests C gardent les vérifications des règles initiales et créent maintena
 
 Le premier scénario concurrence des retraits de 10 € sur un compte à 1 000 € : exactement 100 réussites, puis des refus. Le second réalise 2 400 transferts d'un centime dans les deux sens : tous réussissent et les soldes initiaux sont retrouvés.
 
-Les tests système vérifient les PID, les trois threads de la banque, les files réelles dans `/proc/sysvipc/msg`, les signaux, la disparition du serveur, le nettoyage IPC et l'indépendance de deux sessions.
+Après chaque scénario concurrent, les tests C lisent aussi le tableau partagé : 100 réussites et 2 300 refus pour les retraits, 2 400 réussites et aucun refus pour les transferts. Aucune mise à jour n'est perdue malgré les deux employés.
+
+Les tests système vérifient les PID, les trois threads de la banque, les files réelles dans `/proc/sysvipc/msg` et le segment dans `/proc/sysvipc/shm`, les signaux, la disparition du serveur, le nettoyage IPC, l'indépendance de deux sessions et l'affichage du tableau de bord.
 
 ## 13. Lien avec les cours et ordre de lecture
 
@@ -174,10 +236,11 @@ Les tests système vérifient les PID, les trois threads de la banque, les files
 | Tubes, pages PDF 2 à 8 | Tube de démarrage, fermeture des extrémités, lectures/écritures |
 | Signaux, pages PDF 3 à 5 et 9 à 11 | SIGINT/SIGTERM, envoi, gestion et masquage ; `sigwait` complète le mécanisme |
 | Files de messages, pages PDF 3 à 7 | Messages structurés, types, files System V et suppression |
-| Threads et sémaphores, pages PDF 5 à 12 et 15 à 25 | Employés, attente, mutex, sections critiques et sémaphores POSIX |
+| Threads et sémaphores, pages PDF 5 à 12 et 15 à 25 | Employés, attente, mutex, sections critiques, sémaphores POSIX entre threads et entre processus |
+| Mémoire partagée (shm) | `shmget`, `shmat`, `shmdt`, `shmctl(IPC_RMID)` pour le tableau de bord, synchronisé par sémaphore |
 
-La version utilise les notions de chacun des cinq supports sans chercher à appeler toutes les fonctions citées. Elle ne nécessite pas `exec`, `alarm`, `mkfifo`, `dup2`, ni un segment de mémoire partagée entre processus.
+La version utilise les notions de chacun des six supports sans chercher à appeler toutes les fonctions citées. Elle ne nécessite pas `exec`, `alarm`, `mkfifo`, `dup2`, ni la mémoire partagée POSIX (`shm_open`, `mmap`).
 
 Pour comprendre le code, commence par `banque.h`, puis `executer` dans `banque.c`. Suis ensuite `banque_envoyer`, `travailler`, `banque_demarrer` et `servir`. Termine par la démonstration dans `main.c` et les tests.
 
-Pour présenter le projet : « Les clients sont des processus distincts qui communiquent avec une banque par deux files System V. Deux threads employés sélectionnent les demandes selon leur type. Un mutex protège les comptes et les transferts. Un sémaphore et un tube confirment le démarrage. Les signaux permettent l'arrêt ; le serveur supprime ses files et le parent attend les processus enfants. »
+Pour présenter le projet : « Les clients sont des processus distincts qui communiquent avec une banque par deux files System V. Deux threads employés sélectionnent les demandes selon leur type. Un mutex protège les comptes et les transferts. Un sémaphore et un tube confirment le démarrage. La banque publie son état dans un segment de mémoire partagée, protégé par un sémaphore entre processus, que le processus principal lit directement. Les signaux permettent l'arrêt ; le serveur supprime ses files et le parent attend les processus enfants. »

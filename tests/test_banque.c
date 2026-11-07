@@ -74,6 +74,13 @@ static void tester_concurrence(int retraits) {
         do { pid = waitpid(clients[i], &statut, 0); } while (pid == -1 && errno == EINTR);
         VERIFIER(pid == clients[i] && WIFEXITED(statut) && WEXITSTATUS(statut) == 0);
     }
+    {   /* Les compteurs du segment partage ne doivent perdre aucune requete. */
+        TableauBord t;
+        VERIFIER(banque_lire_tableau(&t));
+        VERIFIER(t.reussies == (retraits ? 100UL : 2400UL));
+        VERIFIER(t.refusees == (retraits ? 2300UL : 0UL));
+        VERIFIER(t.soldes[0] == (retraits ? 0 : 100000) && t.soldes[2] == 100000);
+    }
     VERIFIER(erreurs == 0);
     VERIFIER(succes == (retraits ? 100 : 2400));
     VERIFIER(solde(1) == (retraits ? 0 : 100000));
@@ -86,6 +93,12 @@ int main(void) {
     if (!banque_demarrer()) { fprintf(stderr, "Demarrage impossible\n"); return EXIT_FAILURE; }
     VERIFIER(banque_test_priorites());
     VERIFIER(banque_total() == 600000);
+    {   /* Etat initial publie par la banque avant d'annoncer qu'elle est prete. */
+        TableauBord t;
+        VERIFIER(banque_lire_tableau(&t));
+        VERIFIER(t.soldes[0] == 100000 && t.soldes[5] == 100000);
+        VERIFIER(t.reussies == 0 && t.refusees == 0);
+    }
     VERIFIER(banque_envoyer(1, DEPOT, 1, 0, 1234).statut == SUCCES);
     VERIFIER(solde(1) == 101234);
     VERIFIER(banque_envoyer(1, RETRAIT, 1, 0, 234).statut == SUCCES);
@@ -113,7 +126,21 @@ int main(void) {
     VERIFIER(solde(1) == 98000 && solde(3) == SOLDE_MAX);
     VERIFIER(banque_envoyer(1, RETRAIT, 1, 0, 98000).statut == SUCCES);
     VERIFIER(solde(1) == 0);
+    {   /* Le tableau partage reflete exactement les comptes de la banque. */
+        TableauBord t;
+        int i;
+        Montant somme = 0;
+        VERIFIER(banque_lire_tableau(&t));
+        for (i = 0; i < NB_COMPTES; i++) somme += t.soldes[i];
+        VERIFIER(t.soldes[0] == 0 && t.soldes[1] == 101000 && t.soldes[2] == SOLDE_MAX);
+        VERIFIER(t.total == somme && banque_total() == somme);
+        VERIFIER(t.refusees == 14); /* Les 14 requetes refusees ci-dessus. */
+    }
     banque_arreter();
+    {   /* Segment supprime : plus de lecture possible. */
+        TableauBord t;
+        VERIFIER(!banque_lire_tableau(&t));
+    }
     tester_concurrence(1);
     tester_concurrence(0);
     printf("%d controles, %d echecs.\n", controles, echecs);

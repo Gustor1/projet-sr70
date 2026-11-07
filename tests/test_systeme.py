@@ -13,8 +13,12 @@ EXE = str(Path("build/banque").resolve())
 
 
 def files_presentes():
-    lignes = Path("/proc/sysvipc/msg").read_text().splitlines()[1:]
-    return {int(ligne.split()[1]) for ligne in lignes}
+    """Objets IPC System V existants : ("msg", id) pour les files, ("shm", id) pour les segments."""
+    presents = set()
+    for genre in ("msg", "shm"):
+        lignes = Path(f"/proc/sysvipc/{genre}").read_text().splitlines()[1:]
+        presents |= {(genre, int(ligne.split()[1])) for ligne in lignes}
+    return presents
 
 
 class Systeme(unittest.TestCase):
@@ -23,13 +27,15 @@ class Systeme(unittest.TestCase):
                              stderr=subprocess.PIPE, text=True, start_new_session=True)
         self.addCleanup(self.securite, p)
         ligne = p.stdout.readline()
-        infos = re.search(r"Client PID=(\d+) \| Banque PID=(\d+) \| Files requetes=(\d+) reponses=(\d+)", ligne)
+        infos = re.search(r"Client PID=(\d+) \| Banque PID=(\d+) \| Files requetes=(\d+) reponses=(\d+)"
+                          r" \| Memoire partagee=(\d+)", ligne)
         self.assertIsNotNone(infos, ligne)
-        parent, serveur, q1, q2 = map(int, infos.groups())
+        parent, serveur, q1, q2, segment = map(int, infos.groups())
         self.assertEqual(parent, p.pid)
         self.assertNotEqual(parent, serveur)
-        self.assertTrue({q1, q2} <= files_presentes())
-        return p, serveur, {q1, q2}
+        ipc = {("msg", q1), ("msg", q2), ("shm", segment)}
+        self.assertTrue(ipc <= files_presentes())
+        return p, serveur, ipc
 
     @staticmethod
     def securite(p):
@@ -113,6 +119,17 @@ class Systeme(unittest.TestCase):
         sortie = self.verifier_fermeture(p, serveur, files, "7\n0\n")
         self.assertEqual(len(set(re.findall(r"\[(?:Alice|Bob|Charlie) PID=(\d+)\]", sortie))), 3)
         self.assertIn("Total apres : 6225,00 EUR", sortie)
+        # 3 clients x (5 reussies + 1 refusee) puis 6 consultations des soldes.
+        self.assertIn("Requetes reussies : 21 | refusees : 3", sortie)
+
+    def test_tableau_memoire_partagee(self):
+        p, serveur, files = self.ouvrir()
+        sortie = self.verifier_fermeture(p, serveur, files, "1\n1\n100\n2\n3\n5000\n8\n0\n")
+        self.assertIn("Tableau de bord (lu directement en memoire partagee)", sortie)
+        self.assertIn("Compte 1 (Alice) : 1100,00 EUR", sortie)
+        self.assertIn("Compte 3 (Bob) : 1000,00 EUR", sortie)
+        self.assertIn("Total banque : 6100,00 EUR", sortie)
+        self.assertIn("Requetes reussies : 1 | refusees : 1", sortie)
 
 
 if __name__ == "__main__":

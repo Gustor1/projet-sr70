@@ -88,6 +88,25 @@ static int afficher_comptes(int client) {
     return 1;
 }
 
+/* Vue d'ensemble pour l'operateur : lecture directe du segment partage,
+   sans passer par les files de messages ni par un employe. */
+static int afficher_tableau(void) {
+    TableauBord t;
+    int compte;
+    if (!banque_lire_tableau(&t)) {
+        puts("Tableau de bord indisponible."); return 0;
+    }
+    puts("Tableau de bord (lu directement en memoire partagee) :");
+    for (compte = 1; compte <= NB_COMPTES; compte++) {
+        printf("  Compte %d (%s) : ", compte, banque_client((compte + 1) / 2));
+        afficher_montant(t.soldes[compte - 1]);
+        printf("\n");
+    }
+    printf("  Total banque : "); afficher_montant(t.total);
+    printf("\n  Requetes reussies : %lu | refusees : %lu\n", t.reussies, t.refusees);
+    return 1;
+}
+
 static int client_demo(int client) {
     int source = client * 2 - 1;
     int suivant = client % NB_CLIENTS + 1;
@@ -151,7 +170,7 @@ static int demonstration(void) {
     printf("Total avant : "); afficher_montant(avant);
     printf(" | Total apres : "); afficher_montant(apres);
     puts("\nSur une banque neuve : augmentation attendue de 225 EUR (depots - retraits).");
-    return 1;
+    return afficher_tableau();
 }
 
 int main(int argc, char **argv) {
@@ -171,9 +190,11 @@ int main(int argc, char **argv) {
         puts("Alice : 1,2 | Bob : 3,4 | Charlie : 5,6. Identites simulees, sans mot de passe.");
         for (;;) {
             printf("\nClient actif : %s\n", banque_client(client));
-            puts("1. Depot\n2. Retrait\n3. Transfert\n4. Consultation\n5. Changer de client\n6. Mes comptes\n7. Demonstration concurrente\n0. Quitter");
-            if (!lire_entier("Choix : ", 0, 7, &choix) || choix == 0) break;
-            if (choix == 5) {
+            puts("1. Depot\n2. Retrait\n3. Transfert\n4. Consultation\n5. Changer de client\n6. Mes comptes\n7. Demonstration concurrente\n8. Tableau de bord (memoire partagee)\n0. Quitter");
+            if (!lire_entier("Choix : ", 0, 8, &choix) || choix == 0) break;
+            if (choix == 8) {
+                if (!afficher_tableau()) { ok = 0; break; }
+            } else if (choix == 5) {
                 if (!lire_entier("Client (1 Alice, 2 Bob, 3 Charlie) : ", 1, NB_CLIENTS, &client)) break;
             } else if (choix == 6) {
                 if (!afficher_comptes(client)) { ok = 0; break; }

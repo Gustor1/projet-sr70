@@ -1,8 +1,10 @@
 # Simulation bancaire SR70 en C
 
-Version console Linux, adaptée aux cours de processus, tubes, signaux, files de messages, threads et sémaphores. Trois clients possèdent chacun deux comptes et peuvent déposer, retirer, transférer et consulter leur solde.
+Version console Linux, adaptée aux cours de processus, tubes, signaux, files de messages, threads et sémaphores, et mémoire partagée. Trois clients possèdent chacun deux comptes et peuvent déposer, retirer, transférer et consulter leur solde.
 
-La banque est un processus distinct. Ses deux threads employés reçoivent des demandes par **files de messages System V** et protègent les comptes avec un mutex POSIX. La démonstration crée trois processus clients avec `fork`.
+La banque est un processus distinct. Ses deux threads employés reçoivent des demandes par **files de messages System V** et protègent les comptes avec un mutex POSIX. Après chaque requête, la banque publie un **tableau de bord dans un segment de mémoire partagée** (`shmget`), protégé par un sémaphore partagé entre processus ; le processus principal le lit directement, sans message. La démonstration crée trois processus clients avec `fork`.
+
+Le sujet du projet est dans [docs/consignes-banque.pdf](docs/consignes-banque.pdf).
 
 ## Lancer depuis Windows / CMD
 
@@ -63,6 +65,7 @@ Alice est sélectionnée au démarrage. Les choix sont :
 5. Changement de client.
 6. Consultation des deux comptes du client actif.
 7. Démonstration concurrente sur les soldes actuels.
+8. Tableau de bord : les six soldes, le total et le nombre de requêtes réussies/refusées, lus en mémoire partagée. C'est une vue d'opérateur de la banque, pas une consultation client.
 0. Fermeture.
 
 Les montants acceptent `12`, `12,5`, `12,50` ou `12.50`. Les montants non positifs, trop grands ou avec plus de deux décimales sont refusés. Le solde maximal est d'un milliard d'euros par compte. Les montants sont représentés en centimes entiers.
@@ -81,22 +84,26 @@ La sélection d'un client est une simulation d'identité, sans authentification.
 | Types de messages et priorités | Transfert de type 1, dépôt/retrait de type 2, consultation de type 3 |
 | `pthread_create`, `pthread_join` | Deux employés dans le processus banque |
 | `pthread_mutex_*` | Protection atomique des validations et changements de soldes |
-| `sem_init`, `sem_wait`, `sem_post`, `sem_destroy` | Attente du démarrage des deux employés |
+| `sem_init`, `sem_wait`, `sem_post`, `sem_destroy` | Attente du démarrage des deux employés (entre threads, `pshared = 0`) |
+| `shmget`, `shmat`, `shmdt`, `shmctl` | Segment partagé banque ↔ processus principal contenant le tableau de bord |
+| `sem_init(..., 1, 1)` dans le segment | Sémaphore binaire entre processus protégeant le tableau de bord |
 | `sigaction`, `sigprocmask`, `sigwait`, `kill` | Interruption client et arrêt coordonné du serveur |
-| `IPC_RMID` | Suppression des files à la fermeture |
+| `IPC_RMID` | Suppression des files et du segment à la fermeture |
 
-Les tubes et files ont des rôles distincts : le tube transmet l'octet de confirmation de démarrage ; les files transportent les transactions structurées. Il n'est pas nécessaire d'ajouter `exec`, `alarm`, `mkfifo` et `dup2` pour les utiliser artificiellement.
+Chaque mécanisme a son rôle : le tube transmet l'octet de confirmation de démarrage ; les files transportent les transactions structurées ; la mémoire partagée expose l'état de la banque en lecture rapide. Il n'est pas nécessaire d'ajouter `exec`, `alarm`, `mkfifo` et `dup2` pour les utiliser artificiellement.
 
 ## Observer les mécanismes
 
-Au démarrage, le programme affiche les PID et les identifiants des deux files. Dans un autre terminal de la **même distribution Linux/WSL** :
+Au démarrage, le programme affiche les PID, les identifiants des deux files et celui du segment de mémoire partagée. Dans un autre terminal de la **même distribution Linux/WSL** :
 
 ```sh
-ipcs -q
+ipcs -q -m
 ps -eLf | grep banque
 ```
 
-`Ctrl+C` ou `SIGTERM` provoque un arrêt coordonné. Le parent attend la banque et les clients ; les files sont supprimées. `SIGKILL` n'est pas interceptable : si tous les processus sont tués brutalement, des files peuvent rester. Supprimer alors uniquement les identifiants affichés par cette session avec `ipcrm -q IDENTIFIANT`.
+La colonne `nattch` de `ipcs -m` montre le nombre de processus attachés au segment (2 : le principal et la banque ; plus pendant la démonstration, car les clients héritent de l'attachement par `fork`).
+
+`Ctrl+C` ou `SIGTERM` provoque un arrêt coordonné. Le parent attend la banque et les clients ; les files et le segment sont supprimés. `SIGKILL` n'est pas interceptable : si tous les processus sont tués brutalement, des objets IPC peuvent rester. Supprimer alors uniquement les identifiants affichés par cette session avec `ipcrm -q IDENTIFIANT` (files) et `ipcrm -m IDENTIFIANT` (segment).
 
 ## Comprendre et vérifier
 
