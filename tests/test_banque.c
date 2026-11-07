@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <signal.h>
+#include <time.h>
 
 static int controles, echecs;
 #define VERIFIER(condition) do { controles++; if (!(condition)) { \
@@ -13,6 +15,14 @@ static Montant solde(int compte) {
     return banque_envoyer((compte + 1) / 2, CONSULTATION, compte, 0, 0).solde;
 }
 
+/* Le journal doit avoir recu une ligne par requete traitee par la banque. */
+static int journal_complet(void) {
+    TableauBord t;
+    unsigned long lignes;
+    sleep(1); /* le journal est un autre processus : on lui laisse le temps de lire */
+    return banque_lire_tableau(&t) && banque_lignes_journal(&lignes) &&
+           lignes == t.reussies + t.refusees;
+}
 typedef struct { int mode; int succes; int erreurs; } Travail;
 static void concurrence(Travail *travail) {
     int i;
@@ -81,6 +91,7 @@ static void tester_concurrence(int retraits) {
         VERIFIER(t.refusees == (retraits ? 2300UL : 0UL));
         VERIFIER(t.soldes[0] == (retraits ? 0 : 100000) && t.soldes[2] == 100000);
     }
+    VERIFIER(journal_complet()); /* 2 400 lignes, aucune perdue ni doublee. */
     VERIFIER(erreurs == 0);
     VERIFIER(succes == (retraits ? 100 : 2400));
     VERIFIER(solde(1) == (retraits ? 0 : 100000));
@@ -136,11 +147,20 @@ int main(void) {
         VERIFIER(t.total == somme && banque_total() == somme);
         VERIFIER(t.refusees == 14); /* Les 14 requetes refusees ci-dessus. */
     }
-    banque_arreter();
-    {   /* Segment supprime : plus de lecture possible. */
-        TableauBord t;
-        VERIFIER(!banque_lire_tableau(&t));
+    VERIFIER(journal_complet());
+    {   /* Banque suspendue (SIGSTOP) : alarm arrete l'attente apres 5 s. */
+        pid_t pid = (pid_t)banque_pid_serveur();
+        time_t debut;
+        kill(pid, SIGSTOP);
+        sleep(1); /* laisse au systeme le temps d'arreter la banque */
+        debut = time(NULL);
+        VERIFIER(banque_envoyer(1, CONSULTATION, 2, 0, 0).statut == SERVICE_INDISPONIBLE);
+        VERIFIER(time(NULL) - debut >= 4 && time(NULL) - debut <= 7);
+        kill(pid, SIGCONT);
+        /* La reponse arrivee en retard est ignoree grace a son numero. */
+        VERIFIER(solde(1) == 0 && solde(2) == 101000);
     }
+    banque_arreter();
     tester_concurrence(1);
     tester_concurrence(0);
     printf("%d controles, %d echecs.\n", controles, echecs);

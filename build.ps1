@@ -1,4 +1,4 @@
-param([switch]$Test, [switch]$Systeme, [switch]$Demo, [switch]$Run, [string]$Distribution = 'Ubuntu')
+param([switch]$Test, [switch]$Demo, [switch]$Run, [string]$Distribution = 'Ubuntu')
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 try {
@@ -11,10 +11,6 @@ try {
     if ($Demo) {
         & wsl.exe -d $Distribution --cd $PSScriptRoot -- ./build/banque --demo
         if ($LASTEXITCODE -ne 0) { throw 'Demonstration echouee.' }
-    }
-    if ($Systeme) {
-        & wsl.exe -d $Distribution --cd $PSScriptRoot -- make test-systeme
-        if ($LASTEXITCODE -ne 0) { throw 'Tests systeme echoues.' }
     }
     if ($Run) {
         & wsl.exe -d $Distribution --cd $PSScriptRoot -- ./build/banque

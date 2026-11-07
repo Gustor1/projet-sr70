@@ -88,10 +88,10 @@ static int afficher_comptes(int client) {
     return 1;
 }
 
-/* Vue d'ensemble pour l'operateur : lecture directe du segment partage,
-   sans passer par les files de messages ni par un employe. */
+/* Tableau de bord lu directement en memoire partagee, sans message. */
 static int afficher_tableau(void) {
     TableauBord t;
+    unsigned long lignes;
     int compte;
     if (!banque_lire_tableau(&t)) {
         puts("Tableau de bord indisponible."); return 0;
@@ -104,6 +104,8 @@ static int afficher_tableau(void) {
     }
     printf("  Total banque : "); afficher_montant(t.total);
     printf("\n  Requetes reussies : %lu | refusees : %lu\n", t.reussies, t.refusees);
+    if (banque_lignes_journal(&lignes))
+        printf("  Operations recues par le journal (memoire POSIX) : %lu\n", lignes);
     return 1;
 }
 
@@ -170,6 +172,7 @@ static int demonstration(void) {
     printf("Total avant : "); afficher_montant(avant);
     printf(" | Total apres : "); afficher_montant(apres);
     puts("\nSur une banque neuve : augmentation attendue de 225 EUR (depots - retraits).");
+    sleep(1); /* laisse au journal le temps de lire les dernieres lignes */
     return afficher_tableau();
 }
 

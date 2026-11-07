@@ -1,23 +1,29 @@
 #include "banque.h"
+#include "journal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <string.h>
+#include <sys/ipc.h>
+#include <sys/mman.h>
 #include <sys/msg.h>
 #include <sys/shm.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
-#include <time.h>
 
 #define NB_EMPLOYES 2
-#define DELAI_MAX 5
+#define DELAI_MAX 5 /* secondes d'attente maximum pour une reponse */
+#define PROGRAMME_JOURNAL "build/journal"
+#define FICHIER_JOURNAL "build/journal.txt"
 
 typedef struct { int proprietaire; Montant solde; } Compte;
 typedef struct {
-    long type; /* Positif et obligatoirement en premiere position. */
+    long type; /* priorite de l'operation */
     struct {
         pid_t pid;
         unsigned numero;
@@ -26,30 +32,36 @@ typedef struct {
     } corps;
 } MessageRequete;
 typedef struct {
-    long type; /* PID du destinataire. */
+    long type; /* PID du client destinataire */
     struct { unsigned numero; Reponse resultat; } corps;
 } MessageReponse;
 
-/* Contenu du segment de memoire partagee. Le semaphore doit etre DANS le
-   segment : apres fork, une variable ordinaire serait copiee, pas partagee. */
+/* Segment System V. Le semaphore est dans le segment pour etre
+   reellement partage entre le processus principal et la banque. */
 typedef struct {
-    sem_t verrou;        /* sem_init(..., 1, 1) : binaire, partage entre processus. */
-    TableauBord donnees; /* Ecrit par la banque, lu par le processus principal. */
+    sem_t verrou;
+    TableauBord donnees;
 } SegmentPartage;
 
-/* Les comptes sont modifies uniquement dans le processus banque.
-   Les clients heritent des identifiants IPC par fork, pas des soldes vivants. */
-static Compte comptes[NB_COMPTES];
+static Compte comptes[NB_COMPTES]; /* utilises seulement par la banque */
 static pthread_mutex_t verrou_comptes;
 static sem_t employes_prets;
 static int demandes = -1, reponses = -1, segment = -1;
 static SegmentPartage *partage = NULL;
-static pid_t serveur = -1, proprietaire = -1;
-static volatile sig_atomic_t interruption;
+static CompteurJournal *compteur = NULL;
+static pid_t serveur = -1, journal = -1, proprietaire = -1;
+static int tube_journal = -1;
+static char chemin_tube[64], nom_posix[64];
+static volatile sig_atomic_t interruption, delai_depasse;
 
 static void recevoir_signal(int signal_recu) {
     (void)signal_recu;
-    interruption = 1; /* Aucun printf ni nettoyage dans le gestionnaire. */
+    interruption = 1;
+}
+
+static void recevoir_alarme(int signal_recu) {
+    (void)signal_recu;
+    delai_depasse = 1;
 }
 
 int banque_interrompue(void) { return interruption != 0; }
@@ -74,14 +86,14 @@ const char *banque_message(Statut statut) {
     }
 }
 
-/* Avec msgrcv(..., -3, ...), le plus PETIT type passe en premier. */
+/* Avec msgrcv(..., -3, ...), le plus petit type est lu en premier. */
 static long priorite(int operation) {
     if (operation == TRANSFERT) return 1;
     if (operation == DEPOT || operation == RETRAIT) return 2;
     return 3;
 }
 
-/* Appelee sous verrou : toutes les validations precedent les modifications. */
+/* Appelee sous le mutex : on verifie tout avant de modifier un solde. */
 static Reponse executer(const MessageRequete *message) {
     const int client = message->corps.client;
     const int operation = message->corps.operation;
@@ -133,11 +145,10 @@ static Reponse executer(const MessageRequete *message) {
     return rep;
 }
 
-/* Recopie les comptes dans le segment partage. Appelee sous verrou_comptes :
-   l'ordre des verrous est toujours mutex puis semaphore, donc pas d'interblocage. */
+/* Recopie les comptes dans la memoire partagee (appelee sous le mutex). */
 static void publier(const Reponse *resultat) {
     int i;
-    while (sem_wait(&partage->verrou) == -1 && errno == EINTR) { } /* P() */
+    while (sem_wait(&partage->verrou) == -1 && errno == EINTR) { }
     partage->donnees.total = 0;
     for (i = 0; i < NB_COMPTES; i++) {
         partage->donnees.soldes[i] = comptes[i].solde;
@@ -145,7 +156,26 @@ static void publier(const Reponse *resultat) {
     }
     if (resultat && resultat->statut == SUCCES) partage->donnees.reussies++;
     else if (resultat) partage->donnees.refusees++;
-    sem_post(&partage->verrou); /* V() */
+    sem_post(&partage->verrou);
+}
+
+/* Envoie une ligne au processus journal par le tube nomme. */
+static void journaliser(const MessageRequete *req, const Reponse *resultat) {
+    static const char *noms[] = { "?", "DEPOT", "RETRAIT", "TRANSFERT", "CONSULTATION" };
+    int operation = req->corps.operation;
+    char ligne[200], detail[80] = "";
+    int n;
+    if (tube_journal == -1) return;
+    if (operation < DEPOT || operation > CONSULTATION) operation = 0;
+    if (operation == TRANSFERT)
+        snprintf(detail, sizeof detail, " vers compte %d", req->corps.destination);
+    if (operation != CONSULTATION)
+        snprintf(detail + strlen(detail), sizeof detail - strlen(detail), " : %lld,%02lld EUR",
+                 req->corps.montant / 100, llabs(req->corps.montant % 100));
+    n = snprintf(ligne, sizeof ligne, "%s (%s) compte %d%s -> %s\n",
+                 noms[operation], banque_client(req->corps.client), req->corps.source,
+                 detail, banque_message(resultat->statut));
+    if (write(tube_journal, ligne, (size_t)n) == -1) tube_journal = -1; /* journal arrete */
 }
 
 static void *travailler(void *argument) {
@@ -157,18 +187,16 @@ static void *travailler(void *argument) {
         ssize_t taille = msgrcv(demandes, &req, sizeof req.corps, -3, 0);
         if (taille == -1) {
             if (errno == EINTR) continue;
-            break; /* IPC_RMID reveille les employes bloques. */
+            break; /* file supprimee : fin de la banque */
         }
-        if (taille != (ssize_t)sizeof req.corps || req.corps.pid <= 0) continue;
         rep.type = (long)req.corps.pid;
         rep.corps.numero = req.corps.numero;
         pthread_mutex_lock(&verrou_comptes);
         rep.corps.resultat = executer(&req);
-        publier(&rep.corps.resultat); /* Avant la reponse : le client voit un tableau a jour. */
+        publier(&rep.corps.resultat);
+        journaliser(&req, &rep.corps.resultat);
         pthread_mutex_unlock(&verrou_comptes);
-        while (msgsnd(reponses, &rep, sizeof rep.corps, 0) == -1) {
-            if (errno != EINTR) return NULL;
-        }
+        if (msgsnd(reponses, &rep, sizeof rep.corps, 0) == -1 && errno != EINTR) break;
     }
     return NULL;
 }
@@ -176,93 +204,107 @@ static void *travailler(void *argument) {
 static void supprimer_files(void) {
     if (demandes != -1) msgctl(demandes, IPC_RMID, NULL);
     if (reponses != -1) msgctl(reponses, IPC_RMID, NULL);
-    /* Ne pas modifier les identifiants pendant que les employes les lisent. */
 }
 
-/* Appelee par le processus principal seulement, quand la banque est terminee.
-   shmdt detache ; seul shmctl(IPC_RMID) detruit le segment. */
-static void supprimer_segment(void) {
-    if (partage != NULL) {
-        sem_destroy(&partage->verrou);
-        shmdt(partage);
-        partage = NULL;
-    }
-    if (segment != -1) shmctl(segment, IPC_RMID, NULL);
-    segment = -1;
-}
-
-/* SIGINT et SIGTERM sont bloques dans tous les threads du serveur.
-   Son thread principal les attend avec sigwait, puis nettoie normalement. */
+/* Code du processus banque. SIGINT et SIGTERM y sont bloques :
+   le thread principal les attend avec sigwait. */
 static void servir(int tube_pret, const sigset_t *signaux) {
     pthread_t employes[NB_EMPLOYES];
     int i, signal_recu;
     char pret = 'P';
-    if (pthread_mutex_init(&verrou_comptes, NULL) != 0 ||
-        sem_init(&employes_prets, 0, 0) == -1) _exit(EXIT_FAILURE);
+    signal(SIGPIPE, SIG_IGN); /* si le journal s'arrete, write echoue sans tuer la banque */
+    tube_journal = open(chemin_tube, O_WRONLY); /* attend que le journal ouvre l'autre bout */
+    pthread_mutex_init(&verrou_comptes, NULL);
+    sem_init(&employes_prets, 0, 0);
     for (i = 0; i < NB_COMPTES; i++) {
         comptes[i].proprietaire = i / 2 + 1;
-        comptes[i].solde = 100000;
+        comptes[i].solde = 100000; /* 1000 EUR */
     }
-    publier(NULL); /* Soldes initiaux visibles avant la premiere transaction. */
-    for (i = 0; i < NB_EMPLOYES; i++) {
-        if (pthread_create(&employes[i], NULL, travailler, NULL) != 0) {
-            supprimer_files(); _exit(EXIT_FAILURE);
-        }
-    }
-    for (i = 0; i < NB_EMPLOYES; i++) {
-        while (sem_wait(&employes_prets) == -1) {
-            if (errno != EINTR) _exit(EXIT_FAILURE);
-        }
-    }
-    /* Le pere attend cet octet avant d'envoyer la premiere transaction. */
-    if (write(tube_pret, &pret, 1) != 1) {
-        supprimer_files(); _exit(EXIT_FAILURE);
-    }
+    publier(NULL);
+    for (i = 0; i < NB_EMPLOYES; i++) pthread_create(&employes[i], NULL, travailler, NULL);
+    for (i = 0; i < NB_EMPLOYES; i++) sem_wait(&employes_prets);
+    /* Previent le pere que la banque est prete. */
+    if (write(tube_pret, &pret, 1) != 1) _exit(EXIT_FAILURE);
     close(tube_pret);
     sigwait(signaux, &signal_recu);
-    supprimer_files(); /* Debloque msgrcv ET msgsnd avant les pthread_join. */
+    supprimer_files(); /* reveille les employes bloques dans msgrcv */
     for (i = 0; i < NB_EMPLOYES; i++) pthread_join(employes[i], NULL);
     sem_destroy(&employes_prets);
     pthread_mutex_destroy(&verrou_comptes);
-    shmdt(partage); /* Le parent garde son attachement et supprimera le segment. */
+    close(tube_journal); /* le journal lit alors la fin du tube */
+    shmdt(partage);
     _exit(EXIT_SUCCESS);
 }
 
+/* Fils journal : son entree standard devient le tube nomme, puis il
+   execute le programme journal. */
+static void lancer_journal(void) {
+    int fd;
+    signal(SIGINT, SIG_IGN);  /* reste ignore apres exec : Ctrl+C ne le coupe pas */
+    signal(SIGTERM, SIG_IGN);
+    fd = open(chemin_tube, O_RDONLY);
+    dup2(fd, STDIN_FILENO);
+    close(fd);
+    execl(PROGRAMME_JOURNAL, "journal", FICHIER_JOURNAL, nom_posix, (char *)NULL);
+    perror("execl journal"); /* on arrive ici seulement si exec a echoue */
+    _exit(127);
+}
+
 int banque_demarrer(void) {
-    int tube[2];
+    int tube[2], fd;
     char pret = 0;
-    ssize_t lu;
+    ssize_t lu = 0;
     sigset_t signaux, ancien_masque;
     struct sigaction action = {0};
     interruption = 0;
+    serveur = journal = -1;
     proprietaire = getpid();
-    action.sa_handler = recevoir_signal;
+    /* Sans SA_RESTART : un signal interrompt msgrcv, qui renvoie EINTR. */
     sigemptyset(&action.sa_mask);
-    if (sigaction(SIGINT, &action, NULL) == -1 ||
-        sigaction(SIGTERM, &action, NULL) == -1) return 0;
-    demandes = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
-    if (demandes == -1) return 0;
-    reponses = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
-    if (reponses == -1) { supprimer_files(); return 0; }
-    /* Segment cree et attache AVANT fork : la banque herite de l'attachement. */
-    segment = shmget(IPC_PRIVATE, sizeof(SegmentPartage), IPC_CREAT | 0600);
-    if (segment == -1) { supprimer_files(); return 0; }
+    action.sa_handler = recevoir_signal;
+    sigaction(SIGINT, &action, NULL);
+    sigaction(SIGTERM, &action, NULL);
+    action.sa_handler = recevoir_alarme;
+    sigaction(SIGALRM, &action, NULL);
+
+    /* Tube nomme banque -> journal. Il sert aussi de fichier pour ftok. */
+    snprintf(chemin_tube, sizeof chemin_tube, "/tmp/sr70-banque-%ld.fifo", (long)getpid());
+    if (mkfifo(chemin_tube, 0600) == -1) { chemin_tube[0] = '\0'; return 0; }
+
+    /* Files de messages et segment System V, cles obtenues avec ftok. */
+    demandes = msgget(ftok(chemin_tube, 'R'), IPC_CREAT | 0600);
+    reponses = msgget(ftok(chemin_tube, 'A'), IPC_CREAT | 0600);
+    segment = shmget(ftok(chemin_tube, 'S'), sizeof(SegmentPartage), IPC_CREAT | 0600);
+    if (demandes == -1 || reponses == -1 || segment == -1) { banque_arreter(); return 0; }
     partage = shmat(segment, NULL, 0);
-    if (partage == (void *)-1) {
-        partage = NULL; supprimer_segment(); supprimer_files(); return 0;
-    }
+    if (partage == (void *)-1) { partage = NULL; banque_arreter(); return 0; }
     memset(partage, 0, sizeof *partage);
-    if (sem_init(&partage->verrou, 1, 1) == -1) {
-        shmdt(partage); partage = NULL; supprimer_segment(); supprimer_files(); return 0;
+    sem_init(&partage->verrou, 1, 1); /* 1 : partage entre processus */
+
+    /* Memoire partagee POSIX pour le compteur du journal. */
+    snprintf(nom_posix, sizeof nom_posix, "/sr70-journal-%ld", (long)getpid());
+    fd = shm_open(nom_posix, O_CREAT | O_RDWR, 0600);
+    if (fd == -1) { banque_arreter(); return 0; }
+    if (ftruncate(fd, sizeof(CompteurJournal)) == -1) { close(fd); banque_arreter(); return 0; }
+    compteur = mmap(NULL, sizeof(CompteurJournal), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (compteur == MAP_FAILED) { compteur = NULL; banque_arreter(); return 0; }
+    compteur->lignes = 0;
+    sem_init(&compteur->verrou, 1, 1);
+
+    fflush(NULL);
+    journal = fork();
+    if (journal == 0) lancer_journal();
+    if (journal == -1 || pipe(tube) == -1) {
+        if (journal > 0) kill(journal, SIGKILL);
+        banque_arreter(); return 0;
     }
-    if (pipe(tube) == -1) { supprimer_segment(); supprimer_files(); return 0; }
+
+    /* La banque bloque SIGINT/SIGTERM avant de creer ses threads. */
     sigemptyset(&signaux);
     sigaddset(&signaux, SIGINT);
     sigaddset(&signaux, SIGTERM);
-    if (sigprocmask(SIG_BLOCK, &signaux, &ancien_masque) == -1) {
-        close(tube[0]); close(tube[1]); supprimer_segment(); supprimer_files(); return 0;
-    }
-    fflush(NULL);
+    sigprocmask(SIG_BLOCK, &signaux, &ancien_masque);
     serveur = fork();
     if (serveur == 0) {
         close(tube[0]);
@@ -270,32 +312,26 @@ int banque_demarrer(void) {
     }
     close(tube[1]);
     sigprocmask(SIG_SETMASK, &ancien_masque, NULL);
-    if (serveur == -1) { close(tube[0]); supprimer_segment(); supprimer_files(); return 0; }
-    do { lu = read(tube[0], &pret, 1); } while (lu == -1 && errno == EINTR && !interruption);
+    if (serveur != -1) {
+        do { lu = read(tube[0], &pret, 1); } while (lu == -1 && errno == EINTR && !interruption);
+    }
     close(tube[0]);
-    if (lu != 1 || pret != 'P' || interruption) {
+    if (serveur == -1 || lu != 1 || interruption) {
+        kill(journal, SIGKILL);
         banque_arreter(); return 0;
     }
     return 1;
 }
 
-/* Attentes bornees et interruptibles cote client. Un serveur disparu
-   ne doit pas laisser un processus bloque indefiniment. */
-static int temps_ecoule(const struct timespec *debut) {
-    struct timespec maintenant;
-    clock_gettime(CLOCK_MONOTONIC, &maintenant);
-    return maintenant.tv_sec - debut->tv_sec > DELAI_MAX ||
-           (maintenant.tv_sec - debut->tv_sec == DELAI_MAX && maintenant.tv_nsec >= debut->tv_nsec);
-}
-
+/* Envoi d'une requete puis attente bloquante de la reponse.
+   alarm(DELAI_MAX) evite d'attendre pour toujours si la banque ne repond plus. */
 Reponse banque_envoyer(int client, Operation operation, int source,
                        int destination, Montant montant) {
     static unsigned numero;
     MessageRequete req = {0};
     MessageReponse rep;
-    Reponse erreur = { SERVICE_INDISPONIBLE, -1 };
-    struct timespec debut, pause = { 0, 1000000 };
-    if (interruption || demandes == -1 || reponses == -1) return erreur;
+    Reponse resultat = { SERVICE_INDISPONIBLE, -1 };
+    if (interruption || demandes == -1) return resultat;
     req.type = priorite(operation);
     req.corps.pid = getpid();
     req.corps.numero = ++numero;
@@ -304,20 +340,19 @@ Reponse banque_envoyer(int client, Operation operation, int source,
     req.corps.source = source;
     req.corps.destination = destination;
     req.corps.montant = montant;
-    clock_gettime(CLOCK_MONOTONIC, &debut);
-    while (msgsnd(demandes, &req, sizeof req.corps, IPC_NOWAIT) == -1) {
-        if ((errno != EAGAIN && errno != EINTR) || interruption || temps_ecoule(&debut)) return erreur;
-        nanosleep(&pause, NULL);
+    delai_depasse = 0;
+    alarm(DELAI_MAX);
+    if (msgsnd(demandes, &req, sizeof req.corps, 0) == 0) {
+        for (;;) {
+            ssize_t taille = msgrcv(reponses, &rep, sizeof rep.corps, (long)getpid(), 0);
+            if (taille != -1 && rep.corps.numero == numero) { resultat = rep.corps.resultat; break; }
+            /* Autre erreur qu'un signal, alarme ou Ctrl+C : on abandonne. */
+            if (taille == -1 && (errno != EINTR || delai_depasse || interruption)) break;
+            /* Sinon : ancienne reponse arrivee en retard, on l'ignore. */
+        }
     }
-    for (;;) {
-        ssize_t taille;
-        if (interruption || temps_ecoule(&debut)) return erreur;
-        taille = msgrcv(reponses, &rep, sizeof rep.corps, (long)getpid(), IPC_NOWAIT);
-        if (taille == (ssize_t)sizeof rep.corps && rep.corps.numero == numero)
-            return rep.corps.resultat;
-        if (taille == -1 && errno != ENOMSG && errno != EINTR) return erreur;
-        nanosleep(&pause, NULL);
-    }
+    alarm(0);
+    return resultat;
 }
 
 void banque_arreter(void) {
@@ -328,28 +363,51 @@ void banque_arreter(void) {
         while (waitpid(serveur, &statut, 0) == -1 && errno == EINTR) { }
         serveur = -1;
     }
+    if (journal > 0) {
+        while (waitpid(journal, &statut, 0) == -1 && errno == EINTR) { } /* fin du tube */
+        journal = -1;
+    }
     supprimer_files();
     demandes = reponses = -1;
-    supprimer_segment(); /* Apres waitpid : plus aucun employe ne peut ecrire. */
+    if (partage != NULL) {
+        sem_destroy(&partage->verrou);
+        shmdt(partage);
+        partage = NULL;
+    }
+    if (segment != -1) shmctl(segment, IPC_RMID, NULL);
+    segment = -1;
+    if (compteur != NULL) {
+        sem_destroy(&compteur->verrou);
+        munmap(compteur, sizeof(CompteurJournal));
+        compteur = NULL;
+    }
+    if (nom_posix[0] != '\0') shm_unlink(nom_posix);
+    nom_posix[0] = '\0';
+    if (chemin_tube[0] != '\0') unlink(chemin_tube);
+    chemin_tube[0] = '\0';
 }
 
 void banque_decrire(void) {
-    printf("Client PID=%ld | Banque PID=%ld | Files requetes=%d reponses=%d | Memoire partagee=%d\n",
-           (long)getpid(), (long)serveur, demandes, reponses, segment);
+    printf("Client PID=%ld | Banque PID=%ld | Journal PID=%ld\n",
+           (long)getpid(), (long)serveur, (long)journal);
+    printf("Files requetes=%d reponses=%d | Segment=%d | Tube nomme=%s\n",
+           demandes, reponses, segment, chemin_tube);
 }
 
-/* Lecture sans appel systeme pour les donnees elles-memes : seul le semaphore
-   en demande. L'attente est bornee au cas ou la banque serait tuee verrou pris. */
+/* Lecture directe du segment partage, sans passer par les files. */
 int banque_lire_tableau(TableauBord *copie) {
-    struct timespec limite;
-    if (partage == NULL || interruption) return 0;
-    clock_gettime(CLOCK_REALTIME, &limite);
-    limite.tv_sec += DELAI_MAX;
-    while (sem_timedwait(&partage->verrou, &limite) == -1) {
-        if (errno != EINTR || interruption) return 0;
-    }
-    *copie = partage->donnees; /* Copie coherente : la banque ne peut pas ecrire. */
+    if (partage == NULL) return 0;
+    while (sem_wait(&partage->verrou) == -1 && errno == EINTR) { }
+    *copie = partage->donnees;
     sem_post(&partage->verrou);
+    return 1;
+}
+
+int banque_lignes_journal(unsigned long *lignes) {
+    if (compteur == NULL) return 0;
+    while (sem_wait(&compteur->verrou) == -1 && errno == EINTR) { }
+    *lignes = compteur->lignes;
+    sem_post(&compteur->verrou);
     return 1;
 }
 
@@ -358,6 +416,9 @@ Montant banque_total(void) {
     return banque_lire_tableau(&tableau) ? tableau.total : -1;
 }
 
+long banque_pid_serveur(void) { return (long)serveur; }
+
+/* Verifie l'ordre de lecture des priorites sur une file temporaire. */
 int banque_test_priorites(void) {
     int id = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
     int i, ok = 1;

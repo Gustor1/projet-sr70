@@ -24,8 +24,7 @@ typedef struct {
     unsigned long reussies, refusees; /* Requetes traitees depuis le demarrage. */
 } TableauBord;
 
-/* Linux : demarrer avant les fork clients, arreter apres leurs waitpid.
-   Un seul appel en cours par processus client. Retour : 1 si prete, 0 sinon. */
+/* Demarre la banque et le journal (1 si ok), puis les arrete proprement. */
 int banque_demarrer(void);
 void banque_arreter(void);
 int banque_interrompue(void);
@@ -34,9 +33,11 @@ Reponse banque_envoyer(int client, Operation operation, int source,
                        int destination, Montant montant);
 const char *banque_message(Statut statut);
 const char *banque_client(int client);
-/* Lecture directe du segment partage, sans message. Retour : 1 si lu, 0 sinon. */
+/* Lectures en memoire partagee (System V puis POSIX). Retour : 1 si lu. */
 int banque_lire_tableau(TableauBord *copie);
-/* Outils de verification a appeler sans clients actifs. */
+int banque_lignes_journal(unsigned long *lignes);
+/* Utilises par les tests. */
 Montant banque_total(void);
+long banque_pid_serveur(void);
 int banque_test_priorites(void);
 #endif
