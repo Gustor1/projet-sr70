@@ -1,5 +1,7 @@
 # Simulation bancaire SR70 en C
 
+Auteurs : Eliott LE, Matthias LUTZ, Jad ABDUL RAZEK.
+
 Projet SR70 : simulation d'une banque avec plusieurs clients qui font des opérations en même temps. Le programme utilise les notions vues en cours : processus, tubes, signaux, files de messages, threads, sémaphores et mémoire partagée.
 
 Le sujet est dans [docs/consignes-banque.pdf](docs/consignes-banque.pdf). Les explications détaillées sont dans [EXPLICATIONS.md](EXPLICATIONS.md).
@@ -86,7 +88,7 @@ Depuis PowerShell, dans le dossier du projet :
 ./rendu.ps1
 ```
 
-Le script crée dans `rendu/` le rapport `rapport-sr70.pdf` (imprimé par Edge depuis `docs/rapport/rapport.html`) et l'archive `projet-sr70-source.zip` du code source.
+Le script crée dans `rendu/` le rapport `SR70_Banque_LE_LUTZ_ABDUL-RAZEK_rapport.pdf` (imprimé par Edge depuis `docs/rapport/rapport.html`) et l'archive `SR70_Banque_LE_LUTZ_ABDUL-RAZEK_code.zip` du code source.
 
 ## Si le programme a été tué brutalement
 

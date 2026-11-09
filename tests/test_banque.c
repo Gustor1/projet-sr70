@@ -1,5 +1,6 @@
 /*
  * test_banque.c - Tests automatiques (make test).
+ * Auteurs : Eliott LE, Matthias LUTZ, Jad ABDUL RAZEK (SR70, 2026)
  *
  * Verifie les regles bancaires, l'ordre des priorites, le tableau de bord,
  * le journal, le delai alarm, et deux scenarios de forte concurrence :

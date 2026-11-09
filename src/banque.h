@@ -1,5 +1,6 @@
 /*
  * banque.h - Interface de la banque utilisee par le menu et les tests.
+ * Auteurs : Eliott LE, Matthias LUTZ, Jad ABDUL RAZEK (SR70, 2026)
  * Le detail des processus, threads et IPC est cache dans banque.c.
  */
 #ifndef BANQUE_H

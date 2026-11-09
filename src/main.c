@@ -1,5 +1,6 @@
 /*
  * main.c - Programme principal : menu interactif et demonstration.
+ * Auteurs : Eliott LE, Matthias LUTZ, Jad ABDUL RAZEK (SR70, 2026)
  *
  * Le processus principal joue le role du client choisi dans le menu.
  * La demonstration (choix 7 ou option --demo) cree trois vrais processus

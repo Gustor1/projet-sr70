@@ -1,3 +1,7 @@
+/*
+ * journal.c - Programme journal.
+ * Auteurs : Eliott LE, Matthias LUTZ, Jad ABDUL RAZEK (SR70, 2026)
+ */
 /* Programme journal, lance par la banque avec fork + execl.
    Son entree standard a ete redirigee (dup2) vers le tube nomme :
    il lit les lignes envoyees par la banque et les recopie dans un fichier.

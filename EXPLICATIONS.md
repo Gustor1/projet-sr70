@@ -1,5 +1,7 @@
 # Explications du projet
 
+Auteurs : Eliott LE, Matthias LUTZ, Jad ABDUL RAZEK.
+
 ## 1. Correspondance avec les consignes
 
 | Consigne | Réalisation |

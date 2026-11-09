@@ -1,5 +1,6 @@
 /*
  * banque.c - Processus banque et communication avec les clients.
+ * Auteurs : Eliott LE, Matthias LUTZ, Jad ABDUL RAZEK (SR70, 2026)
  *
  * Organisation des processus (creee par banque_demarrer) :
  *
