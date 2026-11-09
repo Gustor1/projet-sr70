@@ -32,6 +32,8 @@ int main(int argc, char **argv) {
     /* fgets renvoie NULL quand la banque a ferme le tube. */
     while (fgets(ligne, sizeof ligne, stdin) != NULL) {
         fputs(ligne, sortie);
+        /* Compteur partage avec le processus principal : protege par le
+           semaphore place dans la memoire partagee. */
         sem_wait(&compteur->verrou);
         compteur->lignes++;
         sem_post(&compteur->verrou);

@@ -1,3 +1,10 @@
+/*
+ * test_banque.c - Tests automatiques (make test).
+ *
+ * Verifie les regles bancaires, l'ordre des priorites, le tableau de bord,
+ * le journal, le delai alarm, et deux scenarios de forte concurrence :
+ * 24 processus clients envoient chacun 100 requetes en meme temps.
+ */
 #include "banque.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +30,9 @@ static int journal_complet(void) {
     return banque_lire_tableau(&t) && banque_lignes_journal(&lignes) &&
            lignes == t.reussies + t.refusees;
 }
+
+/* Travail d'un processus de test. mode 0 : retraits de 10 EUR sur le compte 1 ;
+   mode 1 : transferts 1 -> 3 ; mode 2 : transferts 3 -> 1 (1 centime chacun). */
 typedef struct { int mode; int succes; int erreurs; } Travail;
 static void concurrence(Travail *travail) {
     int i;
@@ -36,6 +46,12 @@ static void concurrence(Travail *travail) {
     }
 }
 
+/* Lance 24 processus clients en meme temps.
+   - retraits = 1 : 2 400 retraits de 10 EUR sur 1 000 EUR -> exactement 100
+     doivent reussir (le mutex empeche deux retraits sur le meme solde lu) ;
+   - retraits = 0 : 2 400 transferts croises -> les soldes ne doivent pas changer.
+   Un tube "depart" libere tous les clients au meme instant ; un tube
+   "resultats" rapporte au pere le nombre de succes de chacun. */
 static void tester_concurrence(int retraits) {
     pid_t clients[24];
     int depart[2], resultats[2];

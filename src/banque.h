@@ -1,3 +1,7 @@
+/*
+ * banque.h - Interface de la banque utilisee par le menu et les tests.
+ * Le detail des processus, threads et IPC est cache dans banque.c.
+ */
 #ifndef BANQUE_H
 #define BANQUE_H
 
@@ -24,11 +28,16 @@ typedef struct {
     unsigned long reussies, refusees; /* Requetes traitees depuis le demarrage. */
 } TableauBord;
 
-/* Demarre la banque et le journal (1 si ok), puis les arrete proprement. */
+/* Cree les IPC, le processus journal et le processus banque. Retour : 1 si pret. */
 int banque_demarrer(void);
+/* Arrete banque et journal, attend leur fin et supprime toutes les ressources. */
 void banque_arreter(void);
+/* 1 si Ctrl+C ou SIGTERM a ete recu. */
 int banque_interrompue(void);
+/* Affiche les PID et les identifiants IPC (utile avec ipcs et ps). */
 void banque_decrire(void);
+/* Envoie une operation a la banque et attend la reponse (5 s maximum).
+   destination : compte destinataire pour un transfert ; montant en centimes. */
 Reponse banque_envoyer(int client, Operation operation, int source,
                        int destination, Montant montant);
 const char *banque_message(Statut statut);

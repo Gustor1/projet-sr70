@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Rapport SR70 - Simulation bancaire</title>
+<style>
+  @page { size: A4; margin: 18mm 18mm 20mm 18mm; }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { font-family: "Segoe UI", Calibri, Arial, sans-serif; font-size: 10.5pt; line-height: 1.5;
+         color: #1d232b; margin: 0; }
+  h1 { font-size: 20pt; margin: 0 0 6pt; color: #12325a; }
+  h2 { font-size: 14pt; color: #12325a; border-bottom: 1.5pt solid #12325a; padding-bottom: 3pt;
+       margin: 20pt 0 8pt; break-after: avoid; }
+  h3 { font-size: 11.5pt; color: #24507f; margin: 13pt 0 5pt; break-after: avoid; }
+  p { margin: 0 0 7pt; text-align: justify; }
+  ul, ol { margin: 0 0 8pt; padding-left: 18pt; }
+  li { margin-bottom: 2.5pt; }
+  code { font-family: Consolas, "Courier New", monospace; font-size: 9.2pt; background: #eef2f6;
+         padding: 0 2.5pt; border-radius: 2pt; }
+  pre { font-family: Consolas, "Courier New", monospace; font-size: 8.6pt; line-height: 1.35;
+        background: #f3f5f8; border: 0.75pt solid #d3dae3; border-left: 3pt solid #24507f;
+        padding: 6pt 8pt; margin: 4pt 0 9pt; white-space: pre-wrap; break-inside: avoid; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  pre.terminal { background: #1e2329; color: #e3e7ec; border: none; border-left: 3pt solid #4f9d69; }
+  pre.terminal .cmd { color: #8fd19e; }
+  .legende { font-size: 9pt; color: #55606d; font-style: italic; margin: -5pt 0 10pt; text-align: center; }
+  table { border-collapse: collapse; width: 100%; margin: 4pt 0 10pt; font-size: 9.6pt; break-inside: avoid; }
+  th, td { border: 0.75pt solid #c4ccd6; padding: 3.5pt 6pt; text-align: left; vertical-align: top; }
+  th { background: #e4eaf1; color: #12325a; }
+  figure { margin: 6pt 0 10pt; break-inside: avoid; text-align: center; }
+  .exemple { break-inside: avoid; }
+  .encadre { background: #f6f8fb; border: 0.75pt solid #d3dae3; padding: 6pt 9pt; margin: 6pt 0 10pt;
+             break-inside: avoid; }
+  .saut { break-before: page; }
+
+  /* Page de garde */
+  .garde { height: 255mm; display: flex; flex-direction: column; justify-content: space-between; }
+  .garde .haut { font-size: 11pt; color: #55606d; letter-spacing: 0.5pt; }
+  .garde .centre { text-align: center; }
+  .garde .ue { font-size: 13pt; color: #24507f; font-weight: 600; margin-bottom: 14pt; }
+  .garde h1 { font-size: 26pt; margin-bottom: 8pt; }
+  .garde .sous-titre { font-size: 13pt; color: #3a4654; }
+  .garde .trait { width: 60mm; height: 2pt; background: #12325a; margin: 18pt auto; }
+  .garde .auteurs { font-size: 11.5pt; line-height: 1.8; }
+  .garde .bas { font-size: 10pt; color: #55606d; text-align: center; }
+
+  .sommaire { list-style: none; padding: 0; font-size: 11pt; }
+  .sommaire li { border-bottom: 0.5pt dotted #b7c0cb; padding: 3pt 0; margin: 0; }
+  .sommaire ul { list-style: none; padding-left: 16pt; font-size: 10pt; }
+  .sommaire ul li { border: none; padding: 1pt 0; }
+</style>
+</head>
+<body>
+
+<!-- ===================== PAGE DE GARDE ===================== -->
+<section class="garde">
+  <div class="haut">SR70 &mdash; Programmation système Linux</div>
+  <div class="centre">
+    <div class="ue">Rapport de projet</div>
+    <h1>Simulation avancée<br>de système bancaire</h1>
+    <div class="sous-titre">Processus, threads, signaux, IPC System V et POSIX en langage C</div>
+    <div class="trait"></div>
+    <div class="auteurs">
+      [Prénom NOM]<br>
+      [Prénom NOM]
+    </div>
+  </div>
+  <div class="bas">Année universitaire 2026&ndash;2027 &middot; Novembre 2026</div>
+</section>
+
+<!-- ===================== SOMMAIRE ===================== -->
+<section class="saut">
+<h2>Sommaire</h2>
+<ol class="sommaire">
+  <li>1. Sujet traité et fonctionnalités réalisées</li>
+  <li>2. Architecture générale</li>
+  <li>3. Principaux choix de conception</li>
+  <li>4. Concepts de programmation système mis en œuvre
+    <ul><li>4.1 Processus &middot; 4.2 Threads &middot; 4.3 Synchronisation &middot; 4.4 Signaux &middot; 4.5 Tubes
+      &middot; 4.6 Files de messages &middot; 4.7 Mémoire partagée</li></ul></li>
+  <li>5. Difficultés rencontrées et solutions apportées</li>
+  <li>6. Tests et exemples d'exécution</li>
+  <li>7. Limites et améliorations possibles</li>
+  <li>8. Conclusion</li>
+  <li>Annexe &mdash; Compilation, lancement et organisation des fichiers</li>
+</ol>
+
+<!-- ===================== 1. SUJET ===================== -->
+<h2>1. Sujet traité et fonctionnalités réalisées</h2>
+<p>Nous avons choisi le sujet <strong>« Simulation avancée de système bancaire »</strong>. Il demande de simuler
+une banque dans laquelle plusieurs clients, possédant chacun un ou plusieurs comptes, effectuent des
+opérations en même temps. La banque doit traiter ces opérations de façon concurrente, sans incohérence sur
+les soldes, en respectant des priorités entre les types d'opérations, et la communication entre clients et
+banque doit utiliser les mécanismes de communication inter-processus (IPC) de Linux.</p>
+
+<table>
+  <tr><th style="width:42%">Exigence du sujet</th><th>Réalisation dans notre projet</th></tr>
+  <tr><td>Plusieurs clients, chacun avec un ou plusieurs comptes</td>
+      <td>3 clients (Alice, Bob, Charlie) possédant chacun 2 comptes, soit 6 comptes de 1 000 € au départ.</td></tr>
+  <tr><td>Dépôt, retrait, transfert (entre ses comptes ou vers un autre client), consultation</td>
+      <td>Les quatre opérations sont disponibles dans le menu et traitées par la banque.</td></tr>
+  <tr><td>Priorités (par exemple transfert avant consultation)</td>
+      <td>Priorité portée par le type du message : transfert = 1, dépôt/retrait = 2, consultation = 3.</td></tr>
+  <tr><td>Opérations concurrentes protégées par sémaphores ou mutex</td>
+      <td>Deux threads employés traitent les requêtes en parallèle ; un mutex protège les comptes.</td></tr>
+  <tr><td>Transactions atomiques ; échec propre si le solde est insuffisant</td>
+      <td>Vérifications puis modifications dans une même section critique. Un refus ne modifie aucun solde.</td></tr>
+  <tr><td>Communication par tubes, files de messages ou mémoire partagée</td>
+      <td>Les trois sont utilisés : files de messages, tube anonyme, tube nommé, mémoire partagée System V et POSIX.</td></tr>
+</table>
+
+<h3>Fonctionnalités réalisées</h3>
+<ul>
+  <li><strong>Menu interactif</strong> : dépôt, retrait, transfert, consultation, changement de client, affichage des
+      deux comptes du client actif.</li>
+  <li><strong>Démonstration concurrente</strong> : trois processus clients sont créés et envoient leurs opérations
+      en même temps à la banque.</li>
+  <li><strong>Tableau de bord</strong> : les six soldes, le total de la banque et le nombre de requêtes acceptées ou
+      refusées, lus directement en mémoire partagée.</li>
+  <li><strong>Journal des opérations</strong> : un programme séparé enregistre chaque opération et son résultat dans
+      le fichier <code>build/journal.txt</code>.</li>
+  <li><strong>Contrôles</strong> : droits du client sur le compte, montant positif avec au plus deux décimales, solde
+      suffisant, plafond d'un milliard d'euros par compte, comptes source et destination différents.</li>
+  <li><strong>Robustesse</strong> : arrêt propre par Ctrl+C ou SIGTERM, attente limitée à 5 secondes si la banque ne
+      répond plus, suppression de toutes les ressources IPC à la fermeture.</li>
+  <li><strong>Tests automatiques</strong> : 158 vérifications, dont deux scénarios où 24 processus envoient chacun
+      100 requêtes simultanément.</li>
+</ul>
+
+<!-- ===================== 2. ARCHITECTURE ===================== -->
+<h2>2. Architecture générale</h2>
+<p>L'application est composée de plusieurs processus qui communiquent uniquement par les mécanismes IPC du
+noyau. Le processus principal affiche le menu et joue le rôle du client choisi. Au démarrage, il crée le
+processus <em>journal</em> puis le processus <em>banque</em>. Pendant la démonstration, il crée en plus trois
+processus clients.</p>
+
+<figure>
+<svg width="660" height="345" viewBox="0 0 660 345" xmlns="http://www.w3.org/2000/svg"
+     font-family="Segoe UI, Arial, sans-serif" font-size="11">
+  <defs>
+    <marker id="f" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#12325a"/></marker>
+    <marker id="g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#4f7d3a"/></marker>
+    <marker id="o" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#9a6a1c"/></marker>
+  </defs>
+
+  <!-- Processus principal -->
+  <rect x="235" y="6" width="190" height="50" rx="6" fill="#dfe8f3" stroke="#12325a" stroke-width="1.5"/>
+  <text x="330" y="26" text-anchor="middle" font-weight="bold" fill="#12325a">Processus principal</text>
+  <text x="330" y="43" text-anchor="middle">menu, client actif, tableau de bord</text>
+
+  <!-- Creation des processus -->
+  <path d="M265 56 L130 106" stroke="#12325a" stroke-dasharray="4 3" fill="none" marker-end="url(#f)"/>
+  <text x="168" y="74" fill="#12325a">fork + exec</text>
+  <path d="M330 56 L330 106" stroke="#12325a" stroke-dasharray="4 3" fill="none" marker-end="url(#f)"/>
+  <text x="337" y="86" fill="#12325a">fork</text>
+  <path d="M395 56 L530 106" stroke="#12325a" stroke-dasharray="4 3" fill="none" marker-end="url(#f)"/>
+  <text x="455" y="74" fill="#12325a">fork (démo)</text>
+
+  <!-- Journal -->
+  <rect x="20" y="108" width="175" height="62" rx="6" fill="#eef4e8" stroke="#4f7d3a" stroke-width="1.5"/>
+  <text x="107" y="129" text-anchor="middle" font-weight="bold" fill="#3b6129">Journal</text>
+  <text x="107" y="145" text-anchor="middle">programme build/journal</text>
+  <text x="107" y="160" text-anchor="middle">stdin = tube nommé (dup2)</text>
+
+  <!-- Banque -->
+  <rect x="242" y="108" width="176" height="98" rx="6" fill="#dfe8f3" stroke="#12325a" stroke-width="1.5"/>
+  <text x="330" y="128" text-anchor="middle" font-weight="bold" fill="#12325a">Banque</text>
+  <rect x="254" y="137" width="152" height="18" rx="3" fill="#fff" stroke="#8aa0b8"/>
+  <text x="330" y="150" text-anchor="middle">thread principal (sigwait)</text>
+  <rect x="254" y="160" width="72" height="18" rx="3" fill="#fff" stroke="#8aa0b8"/>
+  <text x="290" y="173" text-anchor="middle">employé 1</text>
+  <rect x="334" y="160" width="72" height="18" rx="3" fill="#fff" stroke="#8aa0b8"/>
+  <text x="370" y="173" text-anchor="middle">employé 2</text>
+  <text x="330" y="197" text-anchor="middle" font-size="10">comptes[6] protégés par un mutex</text>
+
+  <!-- Clients -->
+  <rect x="470" y="108" width="170" height="62" rx="6" fill="#f6efe2" stroke="#9a6a1c" stroke-width="1.5"/>
+  <text x="555" y="129" text-anchor="middle" font-weight="bold" fill="#7a5214">Clients</text>
+  <text x="555" y="145" text-anchor="middle">Alice, Bob, Charlie</text>
+  <text x="555" y="160" text-anchor="middle">(3 processus)</text>
+
+  <!-- Files de messages -->
+  <rect x="455" y="228" width="200" height="46" rx="4" fill="#fff" stroke="#9a6a1c" stroke-width="1.2"/>
+  <text x="555" y="246" text-anchor="middle" font-weight="bold">2 files de messages</text>
+  <text x="555" y="259" text-anchor="middle" font-size="10">requêtes : type = priorité</text>
+  <text x="555" y="270" text-anchor="middle" font-size="10">réponses : type = PID du client</text>
+  <!-- client -> requetes -> banque -->
+  <path d="M540 170 L540 226" stroke="#9a6a1c" fill="none" marker-end="url(#o)"/>
+  <text x="533" y="200" text-anchor="end" font-size="10" fill="#7a5214">requête</text>
+  <path d="M570 226 L570 172" stroke="#9a6a1c" fill="none" marker-end="url(#o)"/>
+  <text x="577" y="200" font-size="10" fill="#7a5214">réponse</text>
+  <path d="M455 240 L420 196" stroke="#9a6a1c" fill="none" marker-end="url(#o)"/>
+  <path d="M420 206 L455 256" stroke="#9a6a1c" fill="none" marker-end="url(#o)"/>
+
+  <!-- Tube nomme -->
+  <rect x="20" y="228" width="175" height="40" rx="4" fill="#fff" stroke="#4f7d3a" stroke-width="1.2"/>
+  <text x="107" y="245" text-anchor="middle" font-weight="bold">tube nommé (mkfifo)</text>
+  <text x="107" y="260" text-anchor="middle" font-size="10">une ligne par opération</text>
+  <path d="M242 190 L190 228" stroke="#4f7d3a" fill="none" marker-end="url(#g)"/>
+  <path d="M107 228 L107 172" stroke="#4f7d3a" fill="none" marker-end="url(#g)"/>
+
+  <!-- Memoire POSIX -->
+  <rect x="20" y="290" width="175" height="46" rx="4" fill="#fff" stroke="#4f7d3a" stroke-width="1.2"/>
+  <text x="107" y="307" text-anchor="middle" font-weight="bold">mémoire partagée POSIX</text>
+  <text x="107" y="322" text-anchor="middle" font-size="10">compteur du journal</text>
+  <text x="107" y="333" text-anchor="middle" font-size="9" fill="#55606d">lue par le processus principal</text>
+  <path d="M20 140 L10 140 L10 313 L18 313" stroke="#4f7d3a" fill="none" marker-end="url(#g)"/>
+
+  <!-- Segment System V -->
+  <rect x="242" y="250" width="176" height="46" rx="4" fill="#fff" stroke="#12325a" stroke-width="1.2"/>
+  <text x="330" y="267" text-anchor="middle" font-weight="bold">segment partagé System V</text>
+  <text x="330" y="282" text-anchor="middle" font-size="10">tableau de bord + sémaphore</text>
+  <text x="330" y="293" text-anchor="middle" font-size="9" fill="#55606d">lu par le processus principal</text>
+  <path d="M330 206 L330 248" stroke="#12325a" fill="none" marker-end="url(#f)"/>
+</svg>
+</figure>
+<p class="legende">Figure 1 &ndash; Processus et mécanismes de communication de l'application.</p>
+
+<table>
+  <tr><th style="width:24%">Processus</th><th>Rôle</th></tr>
+  <tr><td>Principal</td><td>Crée les ressources IPC et les autres processus, affiche le menu, envoie les requêtes du
+      client actif, lit le tableau de bord, puis arrête tout et supprime les ressources à la fin.</td></tr>
+  <tr><td>Banque</td><td>Seul processus qui possède les comptes. Son thread principal attend un signal d'arrêt ; ses
+      deux threads employés lisent les requêtes, les exécutent sous mutex et renvoient les réponses.</td></tr>
+  <tr><td>Journal</td><td>Programme indépendant lancé par <code>exec</code>. Il lit les lignes envoyées par la banque
+      dans un tube nommé et les recopie dans un fichier.</td></tr>
+  <tr><td>Clients (démo)</td><td>Trois processus créés par <code>fork</code> qui envoient chacun six opérations en
+      même temps.</td></tr>
+</table>
+
+<h3>Déroulement d'une opération</h3>
+<ol>
+  <li>Le client remplit une requête (opération, comptes, montant, PID, numéro) et l'envoie dans la file des requêtes
+      avec un type égal à sa priorité.</li>
+  <li>Un employé libre retire la requête la plus prioritaire, verrouille le mutex et exécute l'opération.</li>
+  <li>Toujours sous le mutex, il met à jour le tableau de bord en mémoire partagée et écrit une ligne dans le tube
+      nommé pour le journal.</li>
+  <li>Il déverrouille le mutex et envoie la réponse dans la file des réponses, avec pour type le PID du client.</li>
+  <li>Le client, bloqué sur <code>msgrcv</code> avec son PID comme type, reçoit sa réponse et l'affiche.</li>
+</ol>
+
+<h3>Organisation du code</h3>
+<table>
+  <tr><th style="width:28%">Fichier</th><th>Contenu</th></tr>
+  <tr><td><code>src/banque.h</code></td><td>Interface de la banque : types (opérations, statuts, tableau de bord) et fonctions publiques.</td></tr>
+  <tr><td><code>src/banque.c</code></td><td>Processus banque, threads employés, règles bancaires, création et suppression des IPC, envoi des requêtes.</td></tr>
+  <tr><td><code>src/main.c</code></td><td>Menu, saisies sécurisées, démonstration avec trois processus clients.</td></tr>
+  <tr><td><code>src/journal.c</code>, <code>journal.h</code></td><td>Programme journal et structure de la mémoire partagée POSIX.</td></tr>
+  <tr><td><code>tests/test_banque.c</code></td><td>Tests automatiques des règles, des priorités et de la concurrence.</td></tr>
+</table>
+
+<!-- ===================== 3. CHOIX ===================== -->
+<h2>3. Principaux choix de conception</h2>
+
+<h3>La banque est un processus séparé qui seul possède les comptes</h3>
+<p>Après un <code>fork</code>, les variables ordinaires sont copiées : si les comptes étaient de simples variables
+globales, chaque client aurait sa propre copie et les modifications ne seraient jamais partagées. Nous avons donc
+placé les comptes dans le seul processus banque. Un client ne peut lire ou modifier un solde qu'en envoyant une
+requête. Cela correspond aussi au fonctionnement réel d'une banque : le client ne touche jamais directement à la
+base de données.</p>
+
+<h3>Les files de messages pour les transactions</h3>
+<p>Une transaction est une demande suivie d'une réponse destinée à un client précis. Les files de messages System V
+conviennent bien : elles transportent des messages structurés, conservent leur ordre et permettent de choisir le
+message à lire selon son type. Nous en utilisons deux : une pour les requêtes et une pour les réponses. Avec une
+seule file, un employé pourrait lire par erreur une réponse destinée à un client.</p>
+
+<h3>La priorité portée par le type du message</h3>
+<p>Le sujet demande de traiter certaines opérations en priorité. Plutôt que de programmer nous-mêmes une file de
+priorité, nous utilisons le type des messages : transfert = 1, dépôt et retrait = 2, consultation = 3. Les employés
+lisent avec <code>msgrcv(demandes, &amp;req, taille, -3, 0)</code> : le noyau renvoie le message de plus petit type
+inférieur ou égal à 3, donc le plus prioritaire, et à priorité égale le plus ancien.</p>
+
+<h3>Deux employés et un mutex global</h3>
+<p>Deux threads employés permettent de recevoir et préparer plusieurs requêtes en parallèle. Les modifications de
+soldes, elles, sont protégées par un seul mutex qui couvre tous les comptes. Un verrou par compte permettrait plus de
+parallélisme, mais un transfert devrait alors prendre deux verrous, ce qui crée un risque d'interblocage si deux
+transferts croisés les prennent dans un ordre différent. Pour un projet de cette taille, la simplicité et la sûreté
+du verrou global nous ont semblé préférables.</p>
+
+<h3>Les montants en centimes</h3>
+<p>Les montants sont des entiers <code>long long</code> exprimés en centimes. Les nombres à virgule flottante ne
+représentent pas exactement des valeurs comme 0,10 € et produiraient des erreurs d'arrondi sur des milliers
+d'opérations. La saisie « 12,50 » est convertie en 1 250 centimes sans passer par un <code>float</code>.</p>
+
+<h3>Le tableau de bord en mémoire partagée</h3>
+<p>Afficher les six soldes en passant par les files demanderait six requêtes et occuperait les employés. Nous avons
+préféré que la banque publie son état dans un segment de mémoire partagée après chaque opération. Le processus
+principal le lit directement, sans appel aux employés. Les files servent donc aux transactions et la mémoire
+partagée à l'observation de l'état, chacune pour ce qu'elle fait le mieux.</p>
+
+<h3>Le journal dans un programme séparé</h3>
+<p>L'écriture sur disque est lente. Si les employés écrivaient eux-mêmes le fichier journal, ils attendraient le
+disque en tenant le mutex. Ils se contentent donc d'écrire une ligne dans un tube nommé, opération très rapide, et
+un autre programme s'occupe du fichier. Ce choix nous a permis d'utiliser <code>exec</code>, <code>dup2</code> et
+<code>mkfifo</code> dans un rôle concret.</p>
+
+<h3>Un numéro dans chaque requête</h3>
+<p>Si un client abandonne une requête parce que la banque ne répond pas assez vite, la réponse peut arriver plus
+tard et être lue à la place de celle de la requête suivante. Chaque requête porte donc un numéro, recopié dans la
+réponse : le client ignore toute réponse dont le numéro ne correspond pas.</p>
+
+<!-- ===================== 4. CONCEPTS ===================== -->
+<h2>4. Concepts de programmation système mis en œuvre</h2>
+
+<table>
+  <tr><th style="width:22%">Notion du cours</th><th style="width:40%">Appels utilisés</th><th>Rôle dans le projet</th></tr>
+  <tr><td>Processus</td><td><code>fork</code>, <code>execl</code>, <code>waitpid</code>, <code>_exit</code>, <code>getpid</code></td>
+      <td>Banque, journal et clients séparés ; attente des fils.</td></tr>
+  <tr><td>Threads</td><td><code>pthread_create</code>, <code>pthread_join</code></td><td>Deux employés dans la banque.</td></tr>
+  <tr><td>Mutex</td><td><code>pthread_mutex_lock/unlock</code></td><td>Atomicité des opérations sur les comptes.</td></tr>
+  <tr><td>Sémaphores POSIX</td><td><code>sem_init</code>, <code>sem_wait</code>, <code>sem_post</code></td>
+      <td>Démarrage des employés ; accès aux mémoires partagées entre processus.</td></tr>
+  <tr><td>Signaux</td><td><code>sigaction</code>, <code>sigprocmask</code>, <code>sigwait</code>, <code>kill</code>, <code>alarm</code>, <code>SIG_IGN</code></td>
+      <td>Arrêt propre, délai maximal d'attente, protection du journal.</td></tr>
+  <tr><td>Tubes</td><td><code>pipe</code>, <code>mkfifo</code>, <code>dup2</code>, <code>read</code>, <code>write</code></td>
+      <td>Confirmation du démarrage ; canal banque &rarr; journal.</td></tr>
+  <tr><td>Files de messages</td><td><code>ftok</code>, <code>msgget</code>, <code>msgsnd</code>, <code>msgrcv</code>, <code>msgctl</code></td>
+      <td>Requêtes avec priorité et réponses adressées par PID.</td></tr>
+  <tr><td>Mémoire partagée</td><td>System V : <code>shmget</code>, <code>shmat</code>, <code>shmdt</code>, <code>shmctl</code><br>
+      POSIX : <code>shm_open</code>, <code>mmap</code>, <code>munmap</code>, <code>shm_unlink</code></td>
+      <td>Tableau de bord ; compteur du journal.</td></tr>
+</table>
+
+<h3>4.1 Processus</h3>
+<p><code>banque_demarrer()</code> crée deux processus fils avec <code>fork()</code>, qui renvoie 0 dans le fils et le PID
+du fils dans le père. Le fils banque exécute la fonction <code>servir()</code> et se termine par <code>_exit()</code> :
+il ne revient jamais dans le menu du père. Le fils journal remplace son code par un autre programme avec
+<code>execl()</code>. Après <code>exec</code>, le processus garde son PID et ses descripteurs ouverts, mais exécute le
+programme <code>build/journal</code>.</p>
+<p>Le père attend tous ses fils avec <code>waitpid()</code> : à la fermeture pour la banque et le journal, et à la fin
+de la démonstration pour les trois clients. Sans cette attente, les fils terminés resteraient à l'état de zombies.
+Avant chaque <code>fork</code>, nous appelons <code>fflush(NULL)</code> : sinon un texte encore en mémoire tampon serait
+copié dans le fils et affiché deux fois.</p>
+
+<h3>4.2 Threads</h3>
+<p>Le processus banque crée deux threads employés avec <code>pthread_create()</code>. Ils partagent la mémoire du
+processus, donc le tableau des comptes. Chacun exécute une boucle : lecture bloquante d'une requête, traitement,
+réponse. Les threads sont créés uniquement dans le processus banque, <em>après</em> son <code>fork</code> : faire un
+<code>fork</code> depuis un processus multithreadé est délicat, car seul le thread appelant est copié et un verrou
+tenu par un autre thread resterait bloqué pour toujours.</p>
+
+<h3>4.3 Synchronisation : mutex et sémaphores</h3>
+<p><strong>Mutex.</strong> Chaque employé prend <code>verrou_comptes</code> avant d'exécuter une opération et le libère
+après. Les vérifications (solde suffisant, plafond, propriétaire) et les modifications sont dans la même section
+critique :</p>
+<pre><code>pthread_mutex_lock(&amp;verrou_comptes);      /* début de section critique */
+rep.corps.resultat = executer(&amp;req);       /* vérifications puis modifications */
+publier(&amp;rep.corps.resultat);              /* tableau de bord à jour */
+journaliser(&amp;req, &amp;rep.corps.resultat);    /* ligne pour le journal */
+pthread_mutex_unlock(&amp;verrou_comptes);    /* fin de section critique */</code></pre>
+<p>Sans ce verrou, deux retraits de 800 € sur un compte de 1 000 € pourraient tous deux lire le solde de 1 000 €,
+être acceptés et laisser un solde négatif. Avec le verrou, le second voit le solde de 200 € et est refusé.</p>
+<p><strong>Sémaphore entre threads.</strong> <code>employes_prets</code>, initialisé à 0 avec
+<code>sem_init(&amp;employes_prets, 0, 0)</code>, permet au thread principal de la banque d'attendre que les deux
+employés aient démarré (deux <code>sem_wait</code>, chaque employé faisant un <code>sem_post</code>).</p>
+<p><strong>Sémaphores entre processus.</strong> Les deux mémoires partagées contiennent chacune un sémaphore binaire
+initialisé avec <code>sem_init(&amp;verrou, 1, 1)</code>. Le deuxième argument à 1 indique un partage entre processus.
+Le sémaphore est placé <em>dans</em> la mémoire partagée elle-même ; nous expliquons pourquoi dans la partie 5.</p>
+
+<h3>4.4 Signaux</h3>
+<ul>
+  <li><strong>Ctrl+C et SIGTERM dans le processus principal</strong> : le gestionnaire installé avec
+      <code>sigaction()</code> se contente de mettre à 1 une variable <code>volatile sig_atomic_t</code>. Le programme
+      la teste ensuite et ferme proprement la session. Nous n'appelons ni <code>printf</code> ni de nettoyage dans le
+      gestionnaire, car ces fonctions ne sont pas sûres dans ce contexte.</li>
+  <li><strong>Dans la banque</strong> : SIGINT et SIGTERM sont bloqués avec <code>sigprocmask()</code> avant le
+      <code>fork</code>, donc dans tous les threads. Le thread principal les attend avec <code>sigwait()</code>. Un
+      employé n'est ainsi jamais interrompu au milieu d'une transaction.</li>
+  <li><strong><code>alarm()</code></strong> : avant d'attendre sa réponse, le client appelle <code>alarm(5)</code>. Si la
+      banque ne répond pas, SIGALRM interrompt <code>msgrcv</code>. Le gestionnaire étant installé sans
+      <code>SA_RESTART</code>, <code>msgrcv</code> renvoie -1 avec <code>errno = EINTR</code> et le client abandonne.
+      <code>alarm(0)</code> annule l'alarme quand la réponse arrive à temps.</li>
+  <li><strong><code>SIG_IGN</code></strong> : le fils journal ignore SIGINT et SIGTERM avant son <code>exec</code> ; un
+      signal ignoré le reste après <code>exec</code>. La banque ignore SIGPIPE pour ne pas être tuée si le journal
+      disparaît.</li>
+  <li><strong><code>kill()</code></strong> : le père envoie SIGTERM à la banque pour l'arrêter.</li>
+</ul>
+
+<h3>4.5 Tubes : anonyme et nommé</h3>
+<p><strong>Tube anonyme.</strong> Avant de créer la banque, le père crée un tube avec <code>pipe()</code>. Quand ses deux
+employés sont prêts, la banque écrit l'octet <code>'P'</code>. Le père attend cet octet avec <code>read()</code> avant
+d'envoyer la première requête. Chaque processus ferme l'extrémité qu'il n'utilise pas : si la banque meurt avant
+d'écrire, <code>read()</code> renvoie 0 (fin de fichier) au lieu de bloquer.</p>
+<p><strong>Tube nommé.</strong> Le père crée <code>/tmp/sr70-banque-PID.fifo</code> avec <code>mkfifo()</code>. Le fils
+journal l'ouvre en lecture, le place sur son entrée standard avec <code>dup2()</code>, puis lance le programme
+journal :</p>
+<pre><code>fd = open(chemin_tube, O_RDONLY);   /* bloque jusqu'à l'ouverture par la banque */
+dup2(fd, STDIN_FILENO);             /* l'entrée standard devient le tube nommé */
+close(fd);
+execl("build/journal", "journal", "build/journal.txt", nom_posix, (char *)NULL);</code></pre>
+<p>Le programme journal lit simplement <code>stdin</code> avec <code>fgets</code>, sans savoir qu'il s'agit d'un tube.
+Quand la banque se termine, l'extrémité d'écriture est fermée, <code>fgets</code> renvoie <code>NULL</code> et le
+journal termine son fichier.</p>
+
+<h3>4.6 Files de messages System V</h3>
+<p>Les clés des deux files et du segment sont obtenues avec <code>ftok()</code> à partir du chemin du tube nommé,
+avec un caractère différent par objet. Comme ce chemin contient le PID, deux sessions lancées en même temps ont des
+clés différentes.</p>
+<pre><code>demandes = msgget(ftok(chemin_tube, 'R'), IPC_CREAT | 0600);   /* requêtes */
+reponses = msgget(ftok(chemin_tube, 'A'), IPC_CREAT | 0600);   /* réponses */</code></pre>
+<p>Un message commence obligatoirement par un champ <code>long type</code>. Pour les requêtes, il contient la priorité ;
+pour les réponses, le PID du client destinataire. Chaque client lit ainsi uniquement ses réponses avec
+<code>msgrcv(reponses, &amp;rep, taille, getpid(), 0)</code>. À l'arrêt, <code>msgctl(id, IPC_RMID, NULL)</code> supprime
+les files.</p>
+
+<h3>4.7 Mémoire partagée System V et POSIX</h3>
+<p><strong>System V (tableau de bord).</strong> Le segment est créé avec <code>shmget()</code> et attaché avec
+<code>shmat()</code> <em>avant</em> le <code>fork</code> de la banque, qui hérite ainsi de l'attachement. Après chaque
+opération, la banque y recopie les soldes, le total et les compteurs ; le processus principal le lit pour le choix 8
+du menu. À la fin : <code>shmdt()</code> pour détacher, puis <code>shmctl(segment, IPC_RMID, NULL)</code> pour détruire.</p>
+<p><strong>POSIX (compteur du journal).</strong> Le journal ayant fait un <code>exec</code>, il ne connaît plus les
+variables ni les attachements de son père. Il retrouve la zone grâce à son nom :</p>
+<pre><code>fd = shm_open("/sr70-journal-PID", O_RDWR, 0);
+compteur = mmap(NULL, sizeof(CompteurJournal), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);</code></pre>
+<p>Le journal y incrémente le nombre d'opérations reçues, affiché dans le tableau de bord. L'objet est supprimé avec
+<code>shm_unlink()</code> à la fermeture. Utiliser les deux variantes nous a permis de comparer leurs différences :
+désignation par clé numérique ou par nom, et <code>shmat</code> ou <code>mmap</code>.</p>
+
+<!-- ===================== 5. DIFFICULTES ===================== -->
+<h2>5. Difficultés rencontrées et solutions apportées</h2>
+
+<h3>Partager un sémaphore entre deux processus</h3>
+<p><strong>Problème.</strong> Le cours présente <code>sem_init(&amp;s, 1, 1)</code> pour un sémaphore partagé entre
+processus. Mais si <code>s</code> est une variable globale ordinaire, <code>fork</code> la copie : le père et le fils
+manipulent alors deux sémaphores différents, même si le paramètre <code>pshared</code> vaut 1, et la
+synchronisation ne protège plus rien.<br>
+<strong>Solution.</strong> Le sémaphore doit se trouver dans une mémoire réellement partagée. Nous l'avons placé dans
+la structure du segment, à côté des données qu'il protège.</p>
+
+<h3>Éviter un interblocage entre le mutex et le sémaphore</h3>
+<p><strong>Problème.</strong> Pendant la mise à jour du tableau de bord, un employé tient deux verrous : le mutex des
+comptes et le sémaphore du segment. Si un autre code les prenait dans l'ordre inverse, les deux pourraient
+s'attendre mutuellement.<br>
+<strong>Solution.</strong> Les verrous sont toujours pris dans le même ordre (mutex puis sémaphore), et le lecteur du
+tableau de bord ne prend que le sémaphore. Aucun cycle d'attente n'est possible.</p>
+
+<h3>Arrêter proprement des threads bloqués</h3>
+<p><strong>Problème.</strong> À l'arrêt, les employés sont bloqués dans <code>msgrcv</code> et un signal pourrait
+interrompre l'un d'eux au milieu d'un transfert.<br>
+<strong>Solution.</strong> Les signaux d'arrêt sont bloqués dans toute la banque et reçus uniquement par
+<code>sigwait</code> dans le thread principal. Celui-ci supprime alors les files : les employés bloqués sont réveillés
+avec l'erreur <code>EIDRM</code>, sortent de leur boucle, et le thread principal les attend avec
+<code>pthread_join</code>.</p>
+
+<h3>Ne pas bloquer un client si la banque disparaît</h3>
+<p><strong>Problème.</strong> Si la banque est tuée avec <code>kill -9</code>, elle ne supprime pas les files : elles
+existent encore, mais plus personne ne répond. Un client en attente dans un <code>msgrcv</code> bloquant resterait alors
+bloqué pour toujours.<br>
+<strong>Solution.</strong> L'attente est limitée par <code>alarm(5)</code>. Il a fallu installer le gestionnaire de SIGALRM
+<em>sans</em> <code>SA_RESTART</code> : avec cette option, le noyau relance automatiquement <code>msgrcv</code> et le client
+reste bloqué. Le numéro de requête permet ensuite d'ignorer une réponse arrivée en retard.</p>
+
+<h3>Retrouver des ressources IPC après un plantage</h3>
+<p><strong>Problème.</strong> Les files et segments System V, l'objet POSIX et le tube nommé ne disparaissent pas à la
+fin d'un processus. Chaque session mal fermée laisserait donc des objets visibles avec <code>ipcs</code> jusqu'au
+redémarrage de la machine.<br>
+<strong>Solution.</strong> Toutes les suppressions sont regroupées dans <code>banque_arreter()</code>. Elle est appelée à la
+fermeture normale, après Ctrl+C et en cas d'échec du démarrage, et ne libère que ce qui a été créé. Seul le processus
+créateur peut l'exécuter : un client fils qui l'appellerait ne supprime rien. Les noms contiennent le PID, ce qui
+permet de retrouver les restes d'un <code>kill -9</code> et de les supprimer avec <code>ipcrm</code>.</p>
+
+<h3>L'ouverture bloquante du tube nommé</h3>
+<p><strong>Problème.</strong> L'ouverture d'un tube nommé bloque tant que l'autre extrémité n'est pas ouverte. Si le
+journal n'était jamais lancé, la banque restait bloquée au démarrage.<br>
+<strong>Solution.</strong> Le journal est créé <em>avant</em> la banque et ouvre le tube immédiatement. En cas d'échec du
+démarrage, le père tue le journal avec SIGKILL pour qu'il ne reste pas bloqué dans <code>open</code>.</p>
+
+<h3>Un journal en léger retard</h3>
+<p><strong>Problème.</strong> Le journal est un autre processus. Juste après une opération, son compteur peut ne pas
+encore en tenir compte : le tableau de bord affichait parfois 0 opération à la fin de la démonstration.<br>
+<strong>Solution.</strong> Ce décalage est normal entre deux processus indépendants. La démonstration attend une seconde
+avant d'afficher le tableau de bord, et le rapport l'explique plutôt que de le masquer.</p>
+
+<h3>Un test qui échouait une fois sur trois</h3>
+<p><strong>Problème.</strong> Pour tester <code>alarm</code>, nous suspendons la banque avec SIGSTOP puis envoyons une requête.
+Le test échouait parfois : la banque avait le temps de répondre avant d'être réellement arrêtée, car l'envoi d'un
+signal n'est pas instantané.<br>
+<strong>Solution.</strong> Le test attend une seconde après SIGSTOP. Nous l'avons relancé plusieurs fois de suite pour
+vérifier qu'il est devenu stable.</p>
+
+<!-- ===================== 6. TESTS ET EXECUTION ===================== -->
+<h2>6. Tests et exemples d'exécution</h2>
+<p>Toutes les exécutions ci-dessous sont réelles. Elles ont été obtenues sous Ubuntu (WSL2, noyau Linux 6.6) avec
+le programme compilé par <code>gcc -std=c11 -Wall -Wextra -Wpedantic -Werror</code>, sans aucun avertissement.</p>
+
+<h3>6.1 Tests automatiques</h3>
+<p><code>make test</code> exécute 158 vérifications : toutes les règles bancaires (solde insuffisant, compte d'un autre
+client, montant invalide, plafond, même compte), l'ordre des priorités dans une file, la cohérence du tableau de bord,
+le compteur du journal et l'abandon après 5 secondes quand la banque est suspendue. Deux scénarios testent la
+concurrence avec 24 processus qui envoient chacun 100 requêtes en même temps :</p>
+<ul>
+  <li><strong>2 400 retraits de 10 € sur un compte de 1 000 €</strong> : exactement 100 sont acceptés et le solde final
+      est 0 €. Le mutex empêche donc bien deux retraits sur un même solde ;</li>
+  <li><strong>2 400 transferts croisés d'un centime</strong> entre deux comptes : tous réussissent et les soldes
+      reviennent à leur valeur initiale, sans perte ni création d'argent.</li>
+</ul>
+<div class="exemple">
+<pre class="terminal"><span class="cmd">$ make test</span>
+./build/test_banque
+158 controles, 0 echecs.</pre>
+
+<h3>6.2 Démonstration concurrente</h3>
+<p>Trois processus clients, chacun avec son propre PID, envoient leurs opérations en même temps. Les retraits trop
+grands sont refusés sans modifier les soldes. Le total passe de 6 000 € à 6 225 € : +300 € de dépôts et -75 € de
+retraits, les transferts ne changeant pas le total.</p>
+<pre class="terminal"><span class="cmd">$ ./build/banque --demo</span>
+Client PID=525 | Banque PID=527 | Journal PID=526
+Files requetes=7 reponses=8 | Segment=3 | Tube nomme=/tmp/sr70-banque-525.fifo
+
+Trois processus clients en parallele, deux threads employes dans la banque.
+[Alice PID=530] Depot 100 EUR : Succes | solde source : 1100,00 EUR
+[Bob PID=531] Depot 100 EUR : Succes | solde source : 1100,00 EUR
+[Charlie PID=532] Depot 100 EUR : Succes | solde source : 1100,00 EUR
+[Alice PID=530] Retrait 25 EUR : Succes | solde source : 1075,00 EUR
+   ...
+[Alice PID=530] Retrait excessif : Solde insuffisant | solde source : 1025,00 EUR
+[Bob PID=531] Retrait excessif : Solde insuffisant | solde source : 1025,00 EUR
+[Charlie PID=532] Retrait excessif : Solde insuffisant | solde source : 1025,00 EUR
+   ...
+Total avant : 6000,00 EUR | Total apres : 6225,00 EUR
+Tableau de bord (lu directement en memoire partagee) :
+  Compte 1 (Alice) : 1025,00 EUR
+  Compte 2 (Alice) : 1050,00 EUR
+  Compte 3 (Bob) : 1025,00 EUR
+  Compte 4 (Bob) : 1050,00 EUR
+  Compte 5 (Charlie) : 1025,00 EUR
+  Compte 6 (Charlie) : 1050,00 EUR
+  Total banque : 6225,00 EUR
+  Requetes reussies : 21 | refusees : 3
+  Operations recues par le journal (memoire POSIX) : 24
+Banque fermee proprement. Les donnees de simulation ne sont pas conservees.</pre>
+<p class="legende">Exemple 1 &ndash; Démonstration avec trois processus clients (extrait).</p>
+</div>
+
+<h3>6.3 Utilisation du menu et journal</h3>
+<p>Alice dépose 150 € sur le compte 1, tente de retirer 2 000 € du compte 2 (refusé), transfère 75,50 € à Bob, puis
+affiche le tableau de bord.</p>
+<div class="exemple">
+<pre class="terminal">Client actif : Alice
+Choix : <span class="cmd">1</span>   Compte source : <span class="cmd">1</span>   Montant en euros : <span class="cmd">150</span>
+Succes | solde source : 1150,00 EUR
+Choix : <span class="cmd">2</span>   Compte source : <span class="cmd">2</span>   Montant en euros : <span class="cmd">2000</span>
+Solde insuffisant | solde source : 1000,00 EUR
+Choix : <span class="cmd">3</span>   Compte source : <span class="cmd">1</span>   Compte destinataire : <span class="cmd">3</span>   Montant : <span class="cmd">75,50</span>
+Succes | solde source : 1074,50 EUR
+Choix : <span class="cmd">8</span>
+Tableau de bord (lu directement en memoire partagee) :
+  Compte 1 (Alice) : 1074,50 EUR
+  Compte 2 (Alice) : 1000,00 EUR
+  Compte 3 (Bob) : 1075,50 EUR
+  ...
+  Total banque : 6150,00 EUR
+  Requetes reussies : 2 | refusees : 1
+  Operations recues par le journal (memoire POSIX) : 3</pre>
+<p class="legende">Exemple 2 &ndash; Session dans le menu (saisies en vert).</p>
+</div>
+<div class="exemple">
+<pre class="terminal"><span class="cmd">$ cat build/journal.txt</span>
+=== Journal de la session (processus principal PID=535) ===
+DEPOT (Alice) compte 1 : 150,00 EUR -> Succes
+RETRAIT (Alice) compte 2 : 2000,00 EUR -> Solde insuffisant
+TRANSFERT (Alice) compte 1 vers compte 3 : 75,50 EUR -> Succes
+=== Fin : 3 operations ===</pre>
+<p class="legende">Exemple 3 &ndash; Fichier écrit par le processus journal pour cette session.</p>
+</div>
+
+<h3>6.4 Observation des ressources système</h3>
+<p>Pendant une session, les commandes Linux permettent de vérifier que les mécanismes existent réellement :</p>
+<div class="exemple">
+<pre class="terminal"><span class="cmd">$ ipcs -q -m</span>
+------ Message Queues --------
+key        msqid      owner      perms      used-bytes   messages
+0x52304e10 11         eliot      600        0            0
+0x41304e10 12         eliot      600        0            0
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch
+0x53304e10 5          eliot      600        104        2
+<span class="cmd">$ ps -L -o pid,lwp,comm -p 549</span>        # threads de la banque
+    PID     LWP COMMAND
+    549     549 banque
+    549     550 banque
+    549     551 banque
+<span class="cmd">$ ls -l /tmp/sr70-banque-*.fifo /dev/shm/sr70-journal-*</span>
+-rw------- 1 eliot eliot 40 Nov  9 18:28 /dev/shm/sr70-journal-545
+prw------- 1 eliot eliot  0 Nov  9 18:28 /tmp/sr70-banque-545.fifo
+<span class="cmd">$ ls -l /proc/548/fd/0</span>                  # entrée standard du journal
+/proc/548/fd/0 -> /tmp/sr70-banque-545.fifo</pre>
+<p class="legende">Exemple 4 &ndash; Ressources d'une session en cours.</p>
+</div>
+<p>On y voit les deux files de messages et le segment de 104 octets, attaché par deux processus (principal et banque) :
+le journal n'y est pas attaché car <code>exec</code> l'a détaché. La banque compte trois threads : le thread
+principal et les deux employés. Le <code>p</code> de <code>prw-------</code> indique un tube nommé, et l'entrée
+standard du journal pointe bien vers ce tube, ce qui montre l'effet de <code>dup2</code>. Après la fermeture,
+<code>ipcs -q -m</code> ne montre plus aucune file ni aucun segment.</p>
+
+<h3>6.5 Robustesse</h3>
+<p><strong>Ctrl+C pendant le menu</strong> : le programme affiche « Banque fermee proprement » et se termine avec le code
+130. La banque, le journal et toutes les ressources sont supprimés.</p>
+<p><strong>Banque tuée brutalement</strong> (<code>kill -9</code> sur le processus banque) pendant une consultation :</p>
+<pre class="terminal">Choix : 4   Compte source : 1
+Service indisponible/interruption : resultat non confirme      <span class="cmd"># après 5 s (alarm)</span>
+Banque fermee proprement. Les donnees de simulation ne sont pas conservees.</pre>
+<p>Le client n'est pas bloqué : il abandonne au bout de 5 secondes, puis le processus principal nettoie toutes les
+ressources. Le journal se termine lui aussi, car la mort de la banque a fermé le tube nommé.</p>
+
+<!-- ===================== 7. LIMITES ===================== -->
+<h2>7. Limites et améliorations possibles</h2>
+<ul>
+  <li><strong>Identité simulée</strong> : le changement de client se fait par le menu, sans mot de passe. Une vraie
+      banque demanderait une authentification.</li>
+  <li><strong>Données non persistantes</strong> : les soldes sont perdus à la fermeture. On pourrait les sauvegarder
+      dans un fichier à l'arrêt et les recharger au démarrage.</li>
+  <li><strong>Verrou global</strong> : un seul employé à la fois modifie les comptes. Un verrou par compte, pris
+      toujours dans l'ordre croissant des numéros pour éviter l'interblocage, augmenterait le parallélisme.</li>
+  <li><strong>Résultat non confirmé</strong> : si la réponse n'arrive pas dans les 5 secondes, l'opération a pu être
+      exécutée quand même. Le programme l'indique à l'utilisateur, mais ne sait pas annuler ou rejouer une
+      opération.</li>
+  <li><strong>Interface</strong> : l'application fonctionne en mode texte. Un affichage qui se met à jour en continu,
+      par exemple un programme « moniteur » séparé qui relirait le tableau de bord en mémoire partagée, rendrait la
+      concurrence plus visible.</li>
+</ul>
+
+<!-- ===================== 8. CONCLUSION ===================== -->
+<h2>8. Conclusion</h2>
+<p>Ce projet nous a permis d'assembler dans une même application la plupart des notions du cours de programmation
+système. Le plus intéressant a été de comprendre <em>pourquoi</em> chaque mécanisme existe en le choisissant pour un
+besoin précis. Les files de messages transportent des transactions avec priorité, la mémoire partagée offre une
+lecture rapide de l'état, les tubes servent à la signalisation et au flux du journal, le mutex garantit l'atomicité
+et les signaux permettent un arrêt propre.</p>
+<p>Les principales difficultés venaient moins des appels eux-mêmes que de leurs interactions : un sémaphore copié
+par <code>fork</code>, un appel bloquant relancé par <code>SA_RESTART</code>, des threads à réveiller avant de les
+attendre, des ressources IPC qui survivent aux processus. Les tests de concurrence, avec des milliers d'opérations
+simultanées, nous ont permis de vérifier concrètement que les soldes restent cohérents.</p>
+
+<!-- ===================== ANNEXE ===================== -->
+<h2>Annexe &mdash; Compilation, lancement et organisation des fichiers</h2>
+<p>Le programme utilise des appels système Linux. Il se compile et s'exécute sous Linux, ou sous Windows dans
+Ubuntu via WSL. Les commandes se lancent depuis le dossier du projet.</p>
+<pre class="terminal"><span class="cmd">$ make</span>              # compile build/banque, build/journal et build/test_banque
+<span class="cmd">$ ./build/banque</span>    # menu interactif
+<span class="cmd">$ make demo</span>         # démonstration avec trois processus clients
+<span class="cmd">$ make test</span>         # tests automatiques</pre>
+<p>Sous Windows : <code>lancer.cmd</code> (menu) ou <code>./build.ps1 -Test -Demo</code> depuis PowerShell.</p>
+<p>Si le programme est tué avec <code>kill -9</code>, il ne peut pas nettoyer ses ressources. On les supprime alors avec
+<code>ipcrm -q ID</code> (files), <code>ipcrm -m ID</code> (segment) et <code>rm</code> pour le tube nommé et l'objet
+<code>/dev/shm/sr70-journal-PID</code>.</p>
+<pre>projet-sr70/
+├── Makefile, build.ps1, lancer.cmd   compilation et lancement
+├── README.md                         mode d'emploi
+├── EXPLICATIONS.md                   explications détaillées
+├── docs/consignes-banque.pdf         sujet
+├── src/
+│   ├── banque.h, banque.c            banque, threads, IPC, règles bancaires
+│   ├── main.c                        menu et démonstration
+│   └── journal.h, journal.c          programme journal
+└── tests/test_banque.c               tests automatiques</pre>
+
+</section>
+</body>
+</html>

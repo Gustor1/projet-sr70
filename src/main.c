@@ -1,3 +1,10 @@
+/*
+ * main.c - Programme principal : menu interactif et demonstration.
+ *
+ * Le processus principal joue le role du client choisi dans le menu.
+ * La demonstration (choix 7 ou option --demo) cree trois vrais processus
+ * clients avec fork, qui envoient leurs operations en meme temps.
+ */
 #include "banque.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +15,8 @@
 #include <ctype.h>
 #include <errno.h>
 
+/* Les montants sont stockes en centimes (entiers) pour eviter les erreurs
+   d'arrondi des float : 1234 centimes s'affichent "12,34 EUR". */
 static void afficher_montant(Montant montant) {
     printf("%lld,%02lld EUR", montant / 100, montant % 100);
 }
@@ -18,7 +27,9 @@ static void afficher_reponse(Reponse r) {
     printf("\n");
 }
 
-/* fgets permet de rejeter une ligne incorrecte sans bloquer sur scanf. */
+/* Lit une ligne au clavier. fgets (plutot que scanf) permet de rejeter
+   proprement une saisie incorrecte. Retourne 0 en fin d'entree ou apres
+   Ctrl+C (fgets est alors interrompu par le signal). */
 static int lire_ligne(const char *question, char *texte, size_t taille) {
     int c;
     if (banque_interrompue()) return 0;
@@ -33,6 +44,7 @@ static int lire_ligne(const char *question, char *texte, size_t taille) {
     return 1;
 }
 
+/* Redemande tant que la saisie n'est pas un entier entre min et max. */
 static int lire_entier(const char *question, int min, int max, int *valeur) {
     char texte[80], *fin;
     long nombre;
@@ -76,6 +88,7 @@ static int lire_montant(Montant *montant) {
     }
 }
 
+/* Consulte les deux comptes du client en passant par la banque (messages). */
 static int afficher_comptes(int client) {
     int compte;
     printf("Comptes de %s (client %d) :\n", banque_client(client), client);
@@ -109,6 +122,9 @@ static int afficher_tableau(void) {
     return 1;
 }
 
+/* Code execute par chaque processus client de la demonstration :
+   depot, retrait, transfert interne, transfert vers le client suivant,
+   retrait trop grand (doit etre refuse), puis consultation. */
 static int client_demo(int client) {
     int source = client * 2 - 1;
     int suivant = client % NB_CLIENTS + 1;
@@ -133,6 +149,8 @@ static int client_demo(int client) {
     return 1;
 }
 
+/* Cree trois processus clients (fork), les laisse travailler en parallele,
+   les attend (waitpid) puis affiche les soldes et le tableau de bord. */
 static int demonstration(void) {
     pid_t clients[NB_CLIENTS];
     int nombre = 0, i, ok = 1;
@@ -142,7 +160,7 @@ static int demonstration(void) {
     fflush(NULL);
     for (i = 0; i < NB_CLIENTS; i++) {
         pid_t pid = fork();
-        if (pid == 0) {
+        if (pid == 0) { /* fils : un client, puis _exit pour ne pas revenir au menu */
             int resultat = client_demo(i + 1);
             fflush(stdout);
             _exit(resultat ? EXIT_SUCCESS : EXIT_FAILURE);
@@ -150,6 +168,8 @@ static int demonstration(void) {
         if (pid == -1) { perror("fork client"); ok = 0; break; }
         clients[nombre++] = pid;
     }
+    /* Le pere attend chaque fils : pas de processus zombie. Si Ctrl+C arrive
+       pendant l'attente, les clients restants recoivent SIGTERM. */
     for (i = 0; i < nombre; i++) {
         int statut;
         pid_t attendu;
@@ -179,7 +199,7 @@ static int demonstration(void) {
 int main(int argc, char **argv) {
     int choix, client = 1, source, destination, ok = 1;
     Montant montant;
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stdout, NULL, _IOLBF, 0); /* affichage ligne par ligne, meme redirige */
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--demo") != 0)) {
         fprintf(stderr, "Usage : %s [--demo]\n", argv[0]); return EXIT_FAILURE;
     }
@@ -216,7 +236,7 @@ int main(int argc, char **argv) {
             }
         }
     }
-    banque_arreter();
+    banque_arreter(); /* arrete banque et journal, supprime toutes les ressources IPC */
     puts("Banque fermee proprement. Les donnees de simulation ne sont pas conservees.");
     return banque_interrompue() ? 130 : (ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }

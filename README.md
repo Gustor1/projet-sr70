@@ -76,6 +76,17 @@ banque  ──tube nommé──> journal ──mémoire partagée POSIX──> p
 - `src/journal.h`, `src/journal.c` : le programme journal.
 - `tests/test_banque.c` : les tests.
 - `docs/consignes-banque.pdf` : le sujet.
+- `docs/rapport/rapport.html` : source du rapport.
+
+## Préparer le rendu
+
+Depuis PowerShell, dans le dossier du projet :
+
+```powershell
+./rendu.ps1
+```
+
+Le script crée dans `rendu/` le rapport `rapport-sr70.pdf` (imprimé par Edge depuis `docs/rapport/rapport.html`) et l'archive `projet-sr70-source.zip` du code source.
 
 ## Si le programme a été tué brutalement
 
